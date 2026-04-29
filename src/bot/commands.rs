@@ -81,8 +81,48 @@ async fn handle_window(bot: &Bot, msg: &Message, deps: &Deps) -> ResponseResult<
         out
     };
 
-    bot.send_message(msg.chat.id, body).await?;
+    // Telegram sendMessage caps at 4096 chars; with 30×120-char entries the
+    // body can hit ~5kB, so chunk into 4000-char pieces (leaves headroom for
+    // multi-byte chars expanding under MarkdownV2 escaping later).
+    for chunk in chunk_message(&body, 4000) {
+        bot.send_message(msg.chat.id, chunk).await?;
+    }
     Ok(())
+}
+
+fn chunk_message(s: &str, limit: usize) -> Vec<String> {
+    if s.chars().count() <= limit {
+        return vec![s.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    for line in s.split_inclusive('\n') {
+        // If a single line is itself longer than `limit`, hard-break it.
+        if line.chars().count() > limit {
+            if !buf.is_empty() {
+                out.push(std::mem::take(&mut buf));
+            }
+            let mut piece = String::new();
+            for c in line.chars() {
+                piece.push(c);
+                if piece.chars().count() >= limit {
+                    out.push(std::mem::take(&mut piece));
+                }
+            }
+            if !piece.is_empty() {
+                buf = piece;
+            }
+            continue;
+        }
+        if buf.chars().count() + line.chars().count() > limit {
+            out.push(std::mem::take(&mut buf));
+        }
+        buf.push_str(line);
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
 }
 
 async fn count_messages(deps: &Deps, chat_id: i64) -> anyhow::Result<i64> {
