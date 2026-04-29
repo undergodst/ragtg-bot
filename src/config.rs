@@ -98,11 +98,21 @@ pub struct ObservabilityConfig {
     pub log_level: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Secrets {
     pub tg_bot_token: String,
     pub or_api_key: String,
     pub deepinfra_key: String,
+}
+
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Secrets")
+            .field("tg_bot_token", &"[REDACTED]")
+            .field("or_api_key", &"[REDACTED]")
+            .field("deepinfra_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Config {

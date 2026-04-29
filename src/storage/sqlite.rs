@@ -12,7 +12,7 @@ pub async fn init_pool(path: &str, max_connections: u32) -> Result<SqlitePool> {
     if let Some(parent) = Path::new(path).parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
 
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))?
@@ -38,6 +38,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
 
 /// `SELECT 1` smoke check.
 pub async fn healthcheck(pool: &SqlitePool) -> Result<()> {
-    let _: i64 = sqlx::query_scalar("SELECT 1").fetch_one(pool).await?;
+    let _: i64 = sqlx::query_scalar!(r#"SELECT 1 AS "v!: i64""#)
+        .fetch_one(pool)
+        .await?;
     Ok(())
 }
