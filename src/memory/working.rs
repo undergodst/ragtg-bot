@@ -29,6 +29,12 @@ pub async fn push(
     window_size: u32,
     ttl_days: u32,
 ) -> Result<()> {
+    if window_size == 0 {
+        // Caller explicitly disabled working memory; no-op rather than
+        // silently keeping one stale entry (LTRIM 0 0 retains element 0).
+        return Ok(());
+    }
+
     let mut conn = pool
         .get()
         .await
@@ -36,7 +42,7 @@ pub async fn push(
 
     let payload = serde_json::to_string(msg)?;
     let key = key(chat_id);
-    let trim_to = window_size.saturating_sub(1) as isize;
+    let trim_to = (window_size - 1) as isize;
     let ttl_seconds = (ttl_days as i64) * 86_400;
 
     deadpool_redis::redis::pipe()
@@ -161,6 +167,22 @@ mod tests {
         assert_eq!(window.len(), 30, "should trim to window_size = 30");
         assert_eq!(window.first().unwrap().text, "m5");
         assert_eq!(window.last().unwrap().text, "m34");
+        cleanup(&pool, chat_id).await;
+    }
+
+    #[tokio::test]
+    async fn push_with_zero_window_size_is_noop() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let chat_id: i64 = -100_000_000_005;
+        cleanup(&pool, chat_id).await;
+
+        push(&pool, chat_id, &mk(1, "ghost", 1), 0, 7)
+            .await
+            .expect("push");
+        let window = get_window(&pool, chat_id, 30).await.expect("get");
+        assert!(window.is_empty(), "window_size = 0 must keep nothing");
         cleanup(&pool, chat_id).await;
     }
 
