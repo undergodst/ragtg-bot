@@ -5,6 +5,7 @@ use qdrant_client::Qdrant;
 use sqlx::SqlitePool;
 
 use crate::config::Config;
+use crate::llm::client::OpenRouterClient;
 
 /// Shared dependencies injected into bot handlers and HTTP servers.
 #[derive(Clone)]
@@ -12,5 +13,6 @@ pub struct Deps {
     pub sqlite: SqlitePool,
     pub qdrant: Arc<Qdrant>,
     pub redis: RedisPool,
+    pub openrouter: OpenRouterClient,
     pub config: Arc<Config>,
 }

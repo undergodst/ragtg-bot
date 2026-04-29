@@ -55,10 +55,18 @@ async fn main() -> anyhow::Result<()> {
     storage::redis::healthcheck(&redis_pool).await?;
     tracing::info!("redis ping ok");
 
+    let openrouter = llm::client::OpenRouterClient::new(
+        config.openrouter.base_url.clone(),
+        config.secrets.or_api_key.clone(),
+        config.openrouter.timeout_sec,
+        config.openrouter.max_retries,
+    )?;
+
     let deps = Deps {
         sqlite: sqlite_pool,
         qdrant: Arc::new(qdrant_client),
         redis: redis_pool,
+        openrouter,
         config: Arc::new(config),
     };
 
