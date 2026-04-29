@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Telegram-бот с RAG-памятью
 
 ## Локальный запуск
@@ -41,3 +42,6 @@ docker compose restart bot
 ```bash
 cp data/bot.db data/bot.db.$(date +%F)
 ```
+=======
+# ragtg-bot
+>>>>>>> 3887370ce65755223e7314ad4e372ceb680c8ca1
