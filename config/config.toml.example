@@ -20,7 +20,7 @@ path = "/data/bot.db"
 max_connections = 5
 
 [qdrant]
-url = "http://qdrant:6333"
+url = "http://qdrant:6334"
 
 [redis]
 url = "redis://redis:6379"
