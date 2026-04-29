@@ -1,0 +1,56 @@
+[bot]
+admin_ids = [123456789]
+default_personality = "default"
+
+[openrouter]
+base_url = "https://openrouter.ai/api/v1"
+model_main = "deepseek/deepseek-v4-flash"
+model_pro = "deepseek/deepseek-v4-flash"
+model_vision = "nvidia/nemotron-3-nano-omni:free"
+model_decision = "deepseek/deepseek-chat-v3:free"
+vision_fallbacks = ["qwen/qwen3-vl:free", "google/gemini-2.0-flash"]
+timeout_sec = 60
+max_retries = 3
+
+[deepinfra]
+embedding_model = "BAAI/bge-m3"
+
+[sqlite]
+path = "/data/bot.db"
+max_connections = 5
+
+[qdrant]
+url = "http://qdrant:6333"
+
+[redis]
+url = "redis://redis:6379"
+
+[memory]
+working_window_size = 30
+working_ttl_days = 7
+episodic_summary_every_n = 20
+episodic_summary_lookback = 50
+facts_extraction_every_n = 50
+facts_lookback = 100
+top_k_summaries = 3
+top_k_facts = 5
+top_k_lore = 3
+fact_dedup_threshold = 0.85
+
+[ratelimit]
+user_cooldown_sec = 30
+chat_max_per_min = 10
+vision_concurrent = 5
+
+[decision]
+mention_p = 1.0
+reply_p = 1.0
+name_in_text_p = 0.7
+question_after_silence_p = 0.3
+silence_threshold_min = 10
+random_p = 0.05
+
+[observability]
+metrics_port = 9090
+healthz_port = 8080
+log_level = "info"
