@@ -1,6 +1,7 @@
 mod bot;
 mod config;
 mod decision;
+mod deps;
 mod error;
 mod llm;
 mod memory;
@@ -16,23 +17,13 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::get;
-use deadpool_redis::Pool as RedisPool;
-use qdrant_client::Qdrant;
 use serde::Serialize;
-use sqlx::SqlitePool;
+use teloxide::Bot;
 use tokio::try_join;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
-
-#[derive(Clone)]
-struct Deps {
-    sqlite: SqlitePool,
-    qdrant: Arc<Qdrant>,
-    redis: RedisPool,
-    #[allow(dead_code)]
-    config: Arc<Config>,
-}
+use crate::deps::Deps;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -71,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(config),
     };
 
-    serve_http(deps).await
+    run(deps).await
 }
 
 fn init_tracing() {
@@ -83,7 +74,7 @@ fn init_tracing() {
         .init();
 }
 
-async fn serve_http(deps: Deps) -> anyhow::Result<()> {
+async fn run(deps: Deps) -> anyhow::Result<()> {
     let healthz_port = deps.config.observability.healthz_port;
     let metrics_port = deps.config.observability.metrics_port;
 
@@ -111,21 +102,36 @@ async fn serve_http(deps: Deps) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("metrics server: {e}"))
     });
 
+    let bot_client = Bot::new(deps.config.secrets.tg_bot_token.clone());
+    let mut dispatcher = bot::build_dispatcher(bot_client, deps.clone());
+    let shutdown_token = dispatcher.shutdown_token();
+    let dispatcher_task = tokio::spawn(async move {
+        dispatcher.dispatch().await;
+        tracing::warn!("teloxide dispatcher exited");
+    });
+    tracing::info!("teloxide dispatcher started");
+
+    // Healthz / metrics outliving the dispatcher is intentional: an invalid TG
+    // token or a transient polling failure should not take down the observability
+    // surface that operators rely on to diagnose the very problem.
     tokio::select! {
-        res = &mut healthz_task => {
-            tracing::error!("healthz task ended: {:?}", res);
-            metrics_task.abort();
-        }
-        res = &mut metrics_task => {
-            tracing::error!("metrics task ended: {:?}", res);
-            healthz_task.abort();
-        }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutdown signal received");
-            healthz_task.abort();
-            metrics_task.abort();
+        }
+        res = &mut healthz_task => {
+            tracing::error!("healthz task ended early: {res:?}");
+        }
+        res = &mut metrics_task => {
+            tracing::error!("metrics task ended early: {res:?}");
         }
     }
+
+    if let Ok(fut) = shutdown_token.shutdown() {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), fut).await;
+    }
+    healthz_task.abort();
+    metrics_task.abort();
+    dispatcher_task.abort();
     Ok(())
 }
 
