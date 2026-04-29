@@ -14,6 +14,9 @@ pub enum Error {
     #[error("redis error: {0}")]
     Redis(String),
 
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
     #[error("openrouter error: {0}")]
     OpenRouter(String),
 

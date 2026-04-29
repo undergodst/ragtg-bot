@@ -2,6 +2,7 @@ use teloxide::prelude::*;
 use teloxide::types::Chat;
 
 use crate::deps::Deps;
+use crate::memory::working::{self, WorkingMessage};
 
 const TEXT_PREVIEW_LEN: usize = 100;
 const TEXT_MAX_LEN: usize = 8000;
@@ -79,6 +80,26 @@ async fn save_message(msg: &Message, deps: &Deps) -> anyhow::Result<()> {
         msg = %preview,
         "msg saved"
     );
+
+    // Working memory: only push messages that have visible text (or media
+    // description, when we wire up vision). Empty entries pollute the prompt.
+    if let Some(t) = text.clone() {
+        let entry = WorkingMessage {
+            user_id,
+            username: username.clone(),
+            text: t,
+            media_desc: None,
+            ts: msg.date.timestamp(),
+        };
+        working::push(
+            &deps.redis,
+            chat_id,
+            &entry,
+            deps.config.memory.working_window_size,
+            deps.config.memory.working_ttl_days,
+        )
+        .await?;
+    }
 
     Ok(())
 }
