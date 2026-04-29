@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO chats (id, title)\n           VALUES (?, ?)\n           ON CONFLICT(id) DO UPDATE SET title = excluded.title",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "38e84630bbc69de9b856d244f663d63e3035cecf54a0709d5ca0e79e8e33536d"
+}
