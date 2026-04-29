@@ -20,8 +20,12 @@ pub fn build_dispatcher(
         )
         .endpoint(handlers::handle_message);
 
+    // No `enable_ctrlc_handler()`: main.rs owns the single Ctrl+C wait, drives
+    // graceful shutdown via `shutdown_token`, and runs the 5s timeout. Two
+    // racing handlers would let teloxide's win, fire `shutdown()` first, and
+    // then main.rs's `if let Ok(fut)` branch would be skipped (Err = "already
+    // shut down"), forcing an immediate `abort()` with no graceful window.
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![deps])
-        .enable_ctrlc_handler()
         .build()
 }
