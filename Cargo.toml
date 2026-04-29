@@ -29,3 +29,6 @@ prometheus = "0.13"
 
 # Config
 figment = { version = "0.10", features = ["toml", "env"] }
+
+# HTTP server (healthz + metrics)
+axum = "0.8"
