@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT text FROM lore WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "text",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e3d4176829a2c6d392fd6e47699ae8d538bb45e2343c7ae00514641833ea998c"
+}

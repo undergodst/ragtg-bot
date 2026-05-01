@@ -2,10 +2,10 @@ use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 
 use crate::deps::Deps;
-use crate::memory::working;
+use crate::memory::{lore, working};
 
 #[derive(BotCommands, Clone, Debug)]
-#[command(rename_rule = "lowercase", description = "Команды:")]
+#[command(rename_rule = "snake_case", description = "Команды:")]
 pub enum Command {
     #[command(description = "приветствие")]
     Start,
@@ -15,6 +15,12 @@ pub enum Command {
     Stats,
     #[command(description = "[admin] показать working memory чата")]
     Window,
+    #[command(description = "[admin] добавить лор: /lore_add текст")]
+    LoreAdd(String),
+    #[command(description = "[admin] список лора")]
+    LoreList,
+    #[command(description = "[admin] удалить лор: /lore_del ID")]
+    LoreDel(String),
 }
 
 pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> ResponseResult<()> {
@@ -41,14 +47,116 @@ pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> Respons
             }
         }
         Command::Window => handle_window(&bot, &msg, &deps).await?,
+        Command::LoreAdd(text) => handle_lore_add(&bot, &msg, &deps, &text).await?,
+        Command::LoreList => handle_lore_list(&bot, &msg, &deps).await?,
+        Command::LoreDel(id_str) => handle_lore_del(&bot, &msg, &deps, &id_str).await?,
     }
     Ok(())
 }
 
+fn is_admin(msg: &Message, deps: &Deps) -> bool {
+    msg.from
+        .as_ref()
+        .map(|u| u.id.0 as i64)
+        .is_some_and(|id| deps.config.bot.admin_ids.contains(&id))
+}
+
+// ── Lore commands ──────────────────────────────────────────────────
+
+async fn handle_lore_add(bot: &Bot, msg: &Message, deps: &Deps, text: &str) -> ResponseResult<()> {
+    if !is_admin(msg, deps) {
+        return Ok(());
+    }
+
+    let text = text.trim();
+    if text.is_empty() {
+        bot.send_message(msg.chat.id, "использование: /lore_add <текст лора>")
+            .await?;
+        return Ok(());
+    }
+
+    let chat_id = msg.chat.id.0;
+    let added_by = msg.from.as_ref().map(|u| u.id.0 as i64);
+
+    match lore::add_lore(deps, chat_id, text, added_by, None).await {
+        Ok(id) => {
+            bot.send_message(msg.chat.id, format!("✅ лор #{id} добавлен"))
+                .await?;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, chat_id, "lore_add failed");
+            bot.send_message(msg.chat.id, "не получилось добавить лор 😔")
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_lore_list(bot: &Bot, msg: &Message, deps: &Deps) -> ResponseResult<()> {
+    if !is_admin(msg, deps) {
+        return Ok(());
+    }
+
+    let chat_id = msg.chat.id.0;
+    match lore::list_lore(deps, chat_id).await {
+        Ok(entries) => {
+            if entries.is_empty() {
+                bot.send_message(msg.chat.id, "лор пуст").await?;
+            } else {
+                let mut body = format!("📜 Лор ({} записей):\n\n", entries.len());
+                for (id, text) in &entries {
+                    let preview: String = text.chars().take(100).collect();
+                    body.push_str(&format!("#{id}: {preview}\n"));
+                }
+                for chunk in chunk_message(&body, 4000) {
+                    bot.send_message(msg.chat.id, chunk).await?;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, chat_id, "lore_list failed");
+            bot.send_message(msg.chat.id, "не смог загрузить лор").await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_lore_del(bot: &Bot, msg: &Message, deps: &Deps, id_str: &str) -> ResponseResult<()> {
+    if !is_admin(msg, deps) {
+        return Ok(());
+    }
+
+    let id_str = id_str.trim();
+    let lore_id: i64 = match id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            bot.send_message(msg.chat.id, "использование: /lore_del <ID>")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    match lore::delete_lore(deps, lore_id).await {
+        Ok(true) => {
+            bot.send_message(msg.chat.id, format!("🗑 лор #{lore_id} удалён"))
+                .await?;
+        }
+        Ok(false) => {
+            bot.send_message(msg.chat.id, format!("лор #{lore_id} не найден"))
+                .await?;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "lore_del failed");
+            bot.send_message(msg.chat.id, "не получилось удалить").await?;
+        }
+    }
+    Ok(())
+}
+
+// ── Window command ─────────────────────────────────────────────────
+
 async fn handle_window(bot: &Bot, msg: &Message, deps: &Deps) -> ResponseResult<()> {
-    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
-    if !user_id.is_some_and(|id| deps.config.bot.admin_ids.contains(&id)) {
-        // Silently ignore for non-admins to avoid leaking the command's existence.
+    if !is_admin(msg, deps) {
         return Ok(());
     }
 
@@ -81,14 +189,13 @@ async fn handle_window(bot: &Bot, msg: &Message, deps: &Deps) -> ResponseResult<
         out
     };
 
-    // Telegram sendMessage caps at 4096 chars; with 30×120-char entries the
-    // body can hit ~5kB, so chunk into 4000-char pieces (leaves headroom for
-    // multi-byte chars expanding under MarkdownV2 escaping later).
     for chunk in chunk_message(&body, 4000) {
         bot.send_message(msg.chat.id, chunk).await?;
     }
     Ok(())
 }
+
+// ── Helpers ────────────────────────────────────────────────────────
 
 fn chunk_message(s: &str, limit: usize) -> Vec<String> {
     if s.chars().count() <= limit {

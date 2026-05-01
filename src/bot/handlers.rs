@@ -10,6 +10,7 @@ use crate::llm::client::Message as LlmMessage;
 use crate::llm::perception;
 use crate::llm::prompts::system::SYSTEM_PROMPT_BASE;
 use crate::memory::episodic;
+use crate::memory::lore;
 use crate::memory::semantic;
 use crate::memory::working::{self, WorkingMessage};
 use crate::storage::redis as rl;
@@ -243,6 +244,16 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
             for f in facts {
                 ctx.push_str(&format!("  - {f}\n"));
             }
+        }
+        messages.push(LlmMessage::system(ctx));
+    }
+
+    // Inject relevant lore entries.
+    let lore_entries = lore::retrieve_relevant_lore(deps, chat_id, &user_text).await;
+    if !lore_entries.is_empty() {
+        let mut ctx = String::from("[Лор чата (внутряки, мемы, история)]:\n");
+        for l in &lore_entries {
+            ctx.push_str(&format!("- {l}\n"));
         }
         messages.push(LlmMessage::system(ctx));
     }

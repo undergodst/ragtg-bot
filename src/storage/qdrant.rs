@@ -1,8 +1,8 @@
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
-    Condition, CreateCollectionBuilder, Distance, Filter, PointStruct,
-    SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
-    Value as QdrantValue,
+    Condition, CreateCollectionBuilder, DeletePointsBuilder, Distance, Filter,
+    PointStruct, PointsIdsList, SearchPointsBuilder, UpsertPointsBuilder,
+    VectorParamsBuilder, Value as QdrantValue,
 };
 use std::collections::HashMap;
 
@@ -144,4 +144,24 @@ pub async fn search_similar_user_facts(
         })
         .collect();
     Ok(hits)
+}
+
+/// Delete a single point by its string ID.
+pub async fn delete_point(
+    client: &Qdrant,
+    collection: &str,
+    point_id: &str,
+) -> Result<()> {
+    let points = PointsIdsList {
+        ids: vec![point_id.to_string().into()],
+    };
+    client
+        .delete_points(
+            DeletePointsBuilder::new(collection)
+                .points(points)
+                .wait(true),
+        )
+        .await
+        .map_err(|e| Error::Qdrant(format!("delete_point({collection}): {e}")))?;
+    Ok(())
 }
