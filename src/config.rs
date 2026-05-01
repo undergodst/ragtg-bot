@@ -10,7 +10,7 @@ use crate::error::Result;
 pub struct Config {
     pub bot: BotConfig,
     pub openrouter: OpenRouterConfig,
-    pub deepinfra: DeepInfraConfig,
+    pub embeddings: EmbeddingsConfig,
     pub sqlite: SqliteConfig,
     pub qdrant: QdrantConfig,
     pub redis: RedisConfig,
@@ -40,7 +40,8 @@ pub struct OpenRouterConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct DeepInfraConfig {
+pub struct EmbeddingsConfig {
+    pub base_url: String,
     pub embedding_model: String,
 }
 
@@ -102,7 +103,6 @@ pub struct ObservabilityConfig {
 pub struct Secrets {
     pub tg_bot_token: String,
     pub or_api_key: String,
-    pub deepinfra_key: String,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -110,7 +110,6 @@ impl std::fmt::Debug for Secrets {
         f.debug_struct("Secrets")
             .field("tg_bot_token", &"[REDACTED]")
             .field("or_api_key", &"[REDACTED]")
-            .field("deepinfra_key", &"[REDACTED]")
             .finish()
     }
 }
@@ -125,11 +124,10 @@ impl Config {
             .merge(Toml::file(&path))
             .merge(
                 Env::raw()
-                    .only(&["TG_BOT_TOKEN", "OR_API_KEY", "DEEPINFRA_KEY"])
+                    .only(&["TG_BOT_TOKEN", "OR_API_KEY"])
                     .map(|key| match key.as_str().to_ascii_uppercase().as_str() {
                         "TG_BOT_TOKEN" => "secrets.tg_bot_token".into(),
                         "OR_API_KEY" => "secrets.or_api_key".into(),
-                        "DEEPINFRA_KEY" => "secrets.deepinfra_key".into(),
                         _ => key.into(),
                     }),
             )

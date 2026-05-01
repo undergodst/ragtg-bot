@@ -7,13 +7,14 @@ base_url = "https://openrouter.ai/api/v1"
 model_main = "deepseek/deepseek-v4-flash"
 model_pro = "deepseek/deepseek-v4-flash"
 model_vision = "nvidia/nemotron-3-nano-omni:free"
-model_decision = "deepseek/deepseek-chat-v3:free"
-vision_fallbacks = ["qwen/qwen3-vl:free", "google/gemini-2.0-flash"]
+model_decision = "google/gemini-2.0-flash-exp:free"
+vision_fallbacks = ["qwen/qwen3-vl:free", "google/gemini-2.0-flash-exp:free"]
 timeout_sec = 60
 max_retries = 3
 
-[deepinfra]
-embedding_model = "BAAI/bge-m3"
+[embeddings]
+base_url = "https://openrouter.ai/api/v1"
+embedding_model = "baai/bge-m3"
 
 [sqlite]
 path = "/data/bot.db"

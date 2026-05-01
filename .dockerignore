@@ -1,0 +1,8 @@
+target/
+.git/
+.env
+data/
+*.log
+*.db
+.claude/
+.gemini/

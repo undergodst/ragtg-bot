@@ -3,7 +3,15 @@
     "allow": [
       "Bash(cargo check *)",
       "Bash(docker compose config *)",
-      "Bash(docker compose build *)"
+      "Bash(docker compose build *)",
+      "Bash(mv Cargo.lock Cargo.lock.bak)",
+      "Bash(git pull *)",
+      "Bash(docker compose *)",
+      "Bash(SQLX_OFFLINE=true cargo test --no-run)",
+      "Bash(SQLX_OFFLINE=true cargo test storage::redis)",
+      "Bash(export DATABASE_URL='sqlite:./data/bot.db')",
+      "Bash(cargo sqlx *)",
+      "Bash(SQLX_OFFLINE=true cargo check)"
     ]
   }
 }

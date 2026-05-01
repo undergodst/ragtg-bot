@@ -64,8 +64,9 @@ async fn main() -> anyhow::Result<()> {
     )?;
 
     let embeddings = llm::embeddings::EmbeddingClient::new(
-        config.secrets.deepinfra_key.clone(),
-        config.deepinfra.embedding_model.clone(),
+        config.embeddings.base_url.clone(),
+        config.secrets.or_api_key.clone(),
+        config.embeddings.embedding_model.clone(),
         config.openrouter.timeout_sec,
         config.openrouter.max_retries,
     )?;

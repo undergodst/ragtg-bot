@@ -11,8 +11,6 @@ use tracing::warn;
 
 use crate::error::{Error, Result};
 
-const DEEPINFRA_BASE: &str = "https://api.deepinfra.com/v1/openai";
-
 #[derive(Debug, Serialize)]
 struct EmbedRequest<'a> {
     model: &'a str,
@@ -32,19 +30,21 @@ struct EmbedData {
 #[derive(Clone)]
 pub struct EmbeddingClient {
     http: reqwest::Client,
+    base_url: String,
     api_key: String,
     model: String,
     max_retries: u32,
 }
 
 impl EmbeddingClient {
-    pub fn new(api_key: String, model: String, timeout_sec: u64, max_retries: u32) -> Result<Self> {
+    pub fn new(base_url: String, api_key: String, model: String, timeout_sec: u64, max_retries: u32) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_sec))
             .build()
             .map_err(|e| Error::OpenRouter(format!("build embedding http client: {e}")))?;
         Ok(Self {
             http,
+            base_url,
             api_key,
             model,
             max_retries,
@@ -70,7 +70,7 @@ impl EmbeddingClient {
             return Ok(Vec::new());
         }
 
-        let url = format!("{DEEPINFRA_BASE}/embeddings");
+        let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let body = EmbedRequest {
             model: &self.model,
             input: texts,
