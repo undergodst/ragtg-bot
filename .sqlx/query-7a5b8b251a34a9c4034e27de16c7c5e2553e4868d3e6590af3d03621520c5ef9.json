@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_facts (user_id, chat_id, fact, fact_type, confidence, qdrant_point_id)\n               VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "7a5b8b251a34a9c4034e27de16c7c5e2553e4868d3e6590af3d03621520c5ef9"
+}

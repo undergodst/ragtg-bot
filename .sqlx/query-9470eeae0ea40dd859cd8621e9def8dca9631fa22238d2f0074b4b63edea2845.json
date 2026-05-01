@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT fact FROM user_facts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "fact",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9470eeae0ea40dd859cd8621e9def8dca9631fa22238d2f0074b4b63edea2845"
+}

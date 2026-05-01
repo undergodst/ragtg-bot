@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT text, media_description\n           FROM messages\n           WHERE chat_id = ? AND user_id = ?\n           ORDER BY created_at DESC\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "text",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "media_description",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "0fdfce777c73c08b1f43f79fbc8c583884c6b974dd2ebddb3a8fe0053503b401"
+}

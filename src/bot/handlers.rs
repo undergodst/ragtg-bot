@@ -9,9 +9,10 @@ use crate::llm::client::Message as LlmMessage;
 use crate::llm::perception;
 use crate::llm::prompts::system::SYSTEM_PROMPT_BASE;
 use crate::memory::episodic;
+use crate::memory::semantic;
 use crate::memory::working::{self, WorkingMessage};
 use crate::storage::redis as rl;
-use crate::tasks::summarize;
+use crate::tasks::{extract_facts, summarize};
 
 const TEXT_PREVIEW_LEN: usize = 100;
 const TEXT_MAX_LEN: usize = 8000;
@@ -48,9 +49,16 @@ pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResul
     {
         let deps_bg = deps.clone();
         let chat_id_bg = msg.chat.id.0;
+        let user_id_bg = msg.from.as_ref().map(|u| u.id.0 as i64);
         tokio::spawn(async move {
             if let Err(e) = summarize::maybe_summarize(&deps_bg, chat_id_bg).await {
                 tracing::warn!(error = %e, chat_id = chat_id_bg, "episodic summarize failed");
+            }
+            // Also trigger per-user fact extraction.
+            if let Some(uid) = user_id_bg {
+                if let Err(e) = extract_facts::maybe_extract_facts(&deps_bg, chat_id_bg, uid).await {
+                    tracing::warn!(error = %e, chat_id = chat_id_bg, user_id = uid, "facts extraction failed");
+                }
             }
         });
     }
@@ -255,7 +263,10 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
     // Retrieve relevant episodic summaries (long-term memory).
     let episodic_summaries = episodic::retrieve_relevant_summaries(deps, chat_id, &user_text).await;
 
-    let mut messages = Vec::with_capacity(3 + episodic_summaries.len() + window.len());
+    // Retrieve facts about users in the working window.
+    let user_facts = semantic::retrieve_facts_for_window_users(deps, chat_id, &window, &user_text).await;
+
+    let mut messages = Vec::with_capacity(4 + episodic_summaries.len() + window.len());
     messages.push(LlmMessage::system(SYSTEM_PROMPT_BASE));
 
     // Inject episodic context between system prompt and working window.
@@ -263,6 +274,18 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
         let mut ctx = String::from("[Релевантный контекст из прошлого чата]:\n");
         for s in &episodic_summaries {
             ctx.push_str(&format!("- {s}\n"));
+        }
+        messages.push(LlmMessage::system(ctx));
+    }
+
+    // Inject known facts about users.
+    if !user_facts.is_empty() {
+        let mut ctx = String::from("[Известные факты о участниках]:\n");
+        for (username, facts) in &user_facts {
+            ctx.push_str(&format!("@{username}:\n"));
+            for f in facts {
+                ctx.push_str(&format!("  - {f}\n"));
+            }
         }
         messages.push(LlmMessage::system(ctx));
     }

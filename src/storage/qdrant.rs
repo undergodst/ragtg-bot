@@ -113,3 +113,35 @@ pub async fn search_similar(
         .collect();
     Ok(hits)
 }
+
+/// Search the `user_facts` collection filtered by both `chat_id` and `user_id`.
+pub async fn search_similar_user_facts(
+    client: &Qdrant,
+    vector: Vec<f32>,
+    chat_id: i64,
+    user_id: i64,
+    top_k: u32,
+) -> Result<Vec<SearchHit>> {
+    let filter = Filter::must([
+        Condition::matches("chat_id", chat_id),
+        Condition::matches("user_id", user_id),
+    ]);
+    let results = client
+        .search_points(
+            SearchPointsBuilder::new("user_facts", vector, top_k as u64)
+                .filter(filter)
+                .with_payload(true),
+        )
+        .await
+        .map_err(|e| Error::Qdrant(format!("search(user_facts): {e}")))?;
+
+    let hits = results
+        .result
+        .into_iter()
+        .map(|sp| SearchHit {
+            score: sp.score,
+            payload: sp.payload,
+        })
+        .collect();
+    Ok(hits)
+}

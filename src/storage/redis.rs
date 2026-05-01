@@ -230,6 +230,36 @@ pub async fn reset_episodic_counter(pool: &Pool, chat_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Increment the per-user per-chat facts extraction counter. Returns the new count.
+pub async fn incr_facts_counter(pool: &Pool, chat_id: i64, user_id: i64) -> Result<i64> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = format!("facts:counter:{chat_id}:{user_id}");
+    let count: i64 = deadpool_redis::redis::cmd("INCR")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("INCR facts counter: {e}")))?;
+    Ok(count)
+}
+
+/// Reset the per-user per-chat facts extraction counter.
+pub async fn reset_facts_counter(pool: &Pool, chat_id: i64, user_id: i64) -> Result<()> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = format!("facts:counter:{chat_id}:{user_id}");
+    deadpool_redis::redis::cmd("DEL")
+        .arg(&key)
+        .query_async::<()>(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("DEL facts counter: {e}")))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! Live-Redis integration tests, skipped when Redis is unreachable.
