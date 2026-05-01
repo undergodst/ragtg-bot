@@ -197,6 +197,39 @@ pub async fn check_chat_quota(pool: &Pool, chat_id: i64, max_per_min: u32) -> Re
     Ok(count <= max_per_min as i64)
 }
 
+/// Increment the per-chat episodic message counter. Returns the new count.
+/// The summarization task checks `count >= episodic_summary_every_n` to
+/// decide whether to run. No TTL — the counter lives until explicitly
+/// reset after a successful summarization.
+pub async fn incr_episodic_counter(pool: &Pool, chat_id: i64) -> Result<i64> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = format!("episodic:counter:{chat_id}");
+    let count: i64 = deadpool_redis::redis::cmd("INCR")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("INCR episodic counter: {e}")))?;
+    Ok(count)
+}
+
+/// Reset the per-chat episodic message counter (after a successful summarization).
+pub async fn reset_episodic_counter(pool: &Pool, chat_id: i64) -> Result<()> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = format!("episodic:counter:{chat_id}");
+    deadpool_redis::redis::cmd("DEL")
+        .arg(&key)
+        .query_async::<()>(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("DEL episodic counter: {e}")))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! Live-Redis integration tests, skipped when Redis is unreachable.

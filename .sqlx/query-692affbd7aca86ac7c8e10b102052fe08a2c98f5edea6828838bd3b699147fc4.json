@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             m.user_id AS \"user_id!: i64\",\n             u.username,\n             m.text,\n             m.media_description\n           FROM messages m\n           JOIN users u ON u.id = m.user_id\n           WHERE m.chat_id = ?\n           ORDER BY m.created_at DESC\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "username",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "text",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "media_description",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "692affbd7aca86ac7c8e10b102052fe08a2c98f5edea6828838bd3b699147fc4"
+}

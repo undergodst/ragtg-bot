@@ -62,11 +62,19 @@ async fn main() -> anyhow::Result<()> {
         config.openrouter.max_retries,
     )?;
 
+    let embeddings = llm::embeddings::EmbeddingClient::new(
+        config.secrets.deepinfra_key.clone(),
+        config.deepinfra.embedding_model.clone(),
+        config.openrouter.timeout_sec,
+        config.openrouter.max_retries,
+    )?;
+
     let deps = Deps {
         sqlite: sqlite_pool,
         qdrant: Arc::new(qdrant_client),
         redis: redis_pool,
         openrouter,
+        embeddings,
         config: Arc::new(config),
     };
 

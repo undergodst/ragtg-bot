@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO episodic_summaries (chat_id, text, qdrant_point_id, message_range_start, message_range_end)\n           VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "1bbddd63c99d50233f780277a3507bab6c7d28ebff07294f32a12298d48a0ebd"
+}

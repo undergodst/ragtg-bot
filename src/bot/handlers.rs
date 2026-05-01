@@ -8,8 +8,10 @@ use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
 use crate::llm::perception;
 use crate::llm::prompts::system::SYSTEM_PROMPT_BASE;
+use crate::memory::episodic;
 use crate::memory::working::{self, WorkingMessage};
 use crate::storage::redis as rl;
+use crate::tasks::summarize;
 
 const TEXT_PREVIEW_LEN: usize = 100;
 const TEXT_MAX_LEN: usize = 8000;
@@ -39,6 +41,18 @@ pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResul
 
     if let Err(e) = save_message(&msg, &deps, media_desc.as_deref()).await {
         tracing::warn!(error = %e, chat_id = msg.chat.id.0, "failed to persist message");
+    }
+
+    // Fire-and-forget background summarization check (cheap Redis INCR on
+    // most calls; only does real work every N messages).
+    {
+        let deps_bg = deps.clone();
+        let chat_id_bg = msg.chat.id.0;
+        tokio::spawn(async move {
+            if let Err(e) = summarize::maybe_summarize(&deps_bg, chat_id_bg).await {
+                tracing::warn!(error = %e, chat_id = chat_id_bg, "episodic summarize failed");
+            }
+        });
     }
 
     match should_reply(&bot, &msg).await {
@@ -238,8 +252,21 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
             Vec::new()
         });
 
-    let mut messages = Vec::with_capacity(2 + window.len());
+    // Retrieve relevant episodic summaries (long-term memory).
+    let episodic_summaries = episodic::retrieve_relevant_summaries(deps, chat_id, &user_text).await;
+
+    let mut messages = Vec::with_capacity(3 + episodic_summaries.len() + window.len());
     messages.push(LlmMessage::system(SYSTEM_PROMPT_BASE));
+
+    // Inject episodic context between system prompt and working window.
+    if !episodic_summaries.is_empty() {
+        let mut ctx = String::from("[Релевантный контекст из прошлого чата]:\n");
+        for s in &episodic_summaries {
+            ctx.push_str(&format!("- {s}\n"));
+        }
+        messages.push(LlmMessage::system(ctx));
+    }
+
     for w in &window {
         messages.push(LlmMessage::user(format_window_msg(w)));
     }
