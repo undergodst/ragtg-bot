@@ -50,6 +50,39 @@ pub async fn check_user_cooldown(pool: &Pool, user_id: i64, cooldown_sec: u32) -
     Ok(resp.as_deref() == Some("OK"))
 }
 
+/// Rate limit specifically for the /ask command.
+/// Returns 0 if allowed (and sets the cooldown), or the remaining TTL in seconds if not.
+pub async fn check_ask_cooldown(pool: &Pool, user_id: i64, cooldown_sec: u64) -> Result<u64> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = format!("rl:ask:{user_id}");
+    
+    // Check TTL
+    let ttl: i64 = deadpool_redis::redis::cmd("TTL")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("TTL: {e}")))?;
+
+    if ttl > 0 {
+        return Ok(ttl as u64);
+    }
+
+    // Set cooldown
+    let _: () = deadpool_redis::redis::cmd("SET")
+        .arg(&key)
+        .arg(1)
+        .arg("EX")
+        .arg(cooldown_sec)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("SET EX: {e}")))?;
+
+    Ok(0)
+}
+
 /// SHA256-keyed cache of media descriptions (image/voice/circle output from
 /// the perception sub-agent). 30-day TTL by default — same media files
 /// (memes, recurring forwards) often repeat in chats and re-running vision

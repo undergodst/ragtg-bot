@@ -21,6 +21,8 @@ pub enum Command {
     LoreList,
     #[command(description = "[admin] удалить лор: /lore_del ID")]
     LoreDel(String),
+    #[command(description = "задать вопрос ИИ-ассистенту (1 раз в 3 часа)")]
+    Ask(String),
 }
 
 pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> ResponseResult<()> {
@@ -50,6 +52,7 @@ pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> Respons
         Command::LoreAdd(text) => handle_lore_add(&bot, &msg, &deps, &text).await?,
         Command::LoreList => handle_lore_list(&bot, &msg, &deps).await?,
         Command::LoreDel(id_str) => handle_lore_del(&bot, &msg, &deps, &id_str).await?,
+        Command::Ask(question) => handle_ask(&bot, &msg, &deps, &question).await?,
     }
     Ok(())
 }
@@ -148,6 +151,66 @@ async fn handle_lore_del(bot: &Bot, msg: &Message, deps: &Deps, id_str: &str) ->
         Err(e) => {
             tracing::warn!(error = %e, "lore_del failed");
             bot.send_message(msg.chat.id, "не получилось удалить").await?;
+        }
+    }
+    Ok(())
+}
+
+// ── Ask command ────────────────────────────────────────────────────
+
+async fn handle_ask(bot: &Bot, msg: &Message, deps: &Deps, question: &str) -> ResponseResult<()> {
+    if question.trim().is_empty() {
+        bot.send_message(msg.chat.id, "ты забыл написать вопрос после команды.")
+            .await?;
+        return Ok(());
+    }
+
+    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
+    
+    // 3 hours = 10800 seconds
+    let cooldown = crate::storage::redis::check_ask_cooldown(&deps.redis, user_id, 10800)
+        .await
+        .unwrap_or(0);
+        
+    if cooldown > 0 {
+        let hours = cooldown / 3600;
+        let minutes = (cooldown % 3600) / 60;
+        bot.send_message(
+            msg.chat.id,
+            format!("подожди, ты уже спрашивал. следующий вопрос можно будет задать через {hours} ч. {minutes} мин."),
+        )
+        .reply_parameters(teloxide::types::ReplyParameters::new(teloxide::types::MessageId(msg.id.0)))
+        .await?;
+        return Ok(());
+    }
+
+    let messages = vec![
+        crate::llm::client::Message::system(
+            "Ты полезный, вежливый и умный ИИ-ассистент. Отвечай подробно и четко на вопросы пользователя.",
+        ),
+        crate::llm::client::Message::user(question),
+    ];
+
+    let resp = deps
+        .openrouter
+        .chat_completion(
+            "ask_command",
+            &deps.config.openrouter.model_pro,
+            &messages,
+            1000,
+        )
+        .await;
+
+    match resp {
+        Ok(completion) => {
+            bot.send_message(msg.chat.id, completion.content)
+                .reply_parameters(teloxide::types::ReplyParameters::new(teloxide::types::MessageId(msg.id.0)))
+                .await?;
+        }
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("ошибка ассистента: {e}"))
+                .reply_parameters(teloxide::types::ReplyParameters::new(teloxide::types::MessageId(msg.id.0)))
+                .await?;
         }
     }
     Ok(())
