@@ -1,8 +1,12 @@
+use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
+use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::{Chat, MessageEntityKind, MessageId, ReplyParameters};
 
 use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
+use crate::llm::perception;
 use crate::llm::prompts::system::SYSTEM_PROMPT_BASE;
 use crate::memory::working::{self, WorkingMessage};
 use crate::storage::redis as rl;
@@ -10,13 +14,30 @@ use crate::storage::redis as rl;
 const TEXT_PREVIEW_LEN: usize = 100;
 const TEXT_MAX_LEN: usize = 8000;
 const REPLY_MAX_TOKENS: u32 = 300;
+const MEDIA_CACHE_TTL_DAYS: u32 = 30;
+/// Upper bound on file size we'll send to the vision model. 10MB covers
+/// every Telegram photo (which the platform itself caps at 10MB) and most
+/// voice messages, while keeping base64-inflated request bodies under
+/// reasonable LLM-provider limits.
+const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 
 /// Persist every incoming message that has a `from` user, then maybe reply
 /// (if the bot was mentioned or replied to). Errors are logged but not
 /// propagated — losing a row of stats or a single LLM call isn't worth
 /// crashing the dispatcher.
 pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResult<()> {
-    if let Err(e) = save_message(&msg, &deps).await {
+    // Perceive media BEFORE persisting so the description goes into both
+    // SQLite and the Redis working window in a single write — keeps the
+    // working memory consistent with what the LLM will see in its prompt.
+    let media_desc = match perceive_media(&bot, &msg, &deps).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, chat_id = msg.chat.id.0, "perceive_media failed");
+            None
+        }
+    };
+
+    if let Err(e) = save_message(&msg, &deps, media_desc.as_deref()).await {
         tracing::warn!(error = %e, chat_id = msg.chat.id.0, "failed to persist message");
     }
 
@@ -66,7 +87,11 @@ async fn rate_limit_pass(msg: &Message, deps: &Deps) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-async fn save_message(msg: &Message, deps: &Deps) -> anyhow::Result<()> {
+async fn save_message(
+    msg: &Message,
+    deps: &Deps,
+    media_desc: Option<&str>,
+) -> anyhow::Result<()> {
     let Some(user) = msg.from.as_ref() else {
         // Channel post / anonymous group admin / etc. Skip for now.
         return Ok(());
@@ -80,6 +105,7 @@ async fn save_message(msg: &Message, deps: &Deps) -> anyhow::Result<()> {
     let tg_message_id = msg.id.0 as i64;
     let text = clip_text(extract_text(msg));
     let has_media: i64 = if detect_media(msg) { 1 } else { 0 };
+    let media_desc_owned = media_desc.map(|s| s.to_string());
 
     sqlx::query!(
         r#"INSERT INTO users (id, username, first_name)
@@ -105,13 +131,14 @@ async fn save_message(msg: &Message, deps: &Deps) -> anyhow::Result<()> {
     .await?;
 
     sqlx::query!(
-        r#"INSERT INTO messages (chat_id, user_id, tg_message_id, text, has_media)
-           VALUES (?, ?, ?, ?, ?)"#,
+        r#"INSERT INTO messages (chat_id, user_id, tg_message_id, text, has_media, media_description)
+           VALUES (?, ?, ?, ?, ?, ?)"#,
         chat_id,
         user_id,
         tg_message_id,
         text,
-        has_media
+        has_media,
+        media_desc_owned
     )
     .execute(&deps.sqlite)
     .await?;
@@ -131,12 +158,16 @@ async fn save_message(msg: &Message, deps: &Deps) -> anyhow::Result<()> {
         "msg saved"
     );
 
-    if let Some(t) = text.clone() {
+    // Push to working memory if there is anything semantic to remember:
+    // either a text body, or a media description (image/voice). A bare
+    // `[photo]` with no description would dilute the prompt with noise.
+    let working_text = text.clone().unwrap_or_default();
+    if !working_text.is_empty() || media_desc_owned.is_some() {
         let entry = WorkingMessage {
             user_id,
             username: username.clone(),
-            text: t,
-            media_desc: None,
+            text: working_text,
+            media_desc: media_desc_owned.clone(),
             ts: msg.date.timestamp(),
         };
         working::push(
@@ -371,4 +402,151 @@ fn detect_media(msg: &Message) -> bool {
         || msg.audio().is_some()
         || msg.sticker().is_some()
         || msg.animation().is_some()
+}
+
+/// What we can usefully send to the perception sub-agent. Other media
+/// kinds (video, video_note/circle, animated stickers, generic documents)
+/// are intentionally absent for the v1 vision pipeline — see CLAUDE.md
+/// step 6 scope.
+enum Perceived {
+    Image { file_id: String, mime: String },
+    Voice { file_id: String },
+}
+
+fn classify_media(msg: &Message) -> Option<Perceived> {
+    if let Some(photos) = msg.photo()
+        && let Some(largest) = photos.last()
+    {
+        return Some(Perceived::Image {
+            file_id: largest.file.id.clone(),
+            mime: "image/jpeg".into(),
+        });
+    }
+    if let Some(voice) = msg.voice() {
+        return Some(Perceived::Voice {
+            file_id: voice.file.id.clone(),
+        });
+    }
+    if let Some(sticker) = msg.sticker() {
+        // Static webp stickers are just images. Animated (TGS Lottie) and
+        // video stickers (webm) need extra decoding we don't do yet.
+        if !sticker.is_animated() && !sticker.is_video() {
+            return Some(Perceived::Image {
+                file_id: sticker.file.id.clone(),
+                mime: "image/webp".into(),
+            });
+        }
+    }
+    if let Some(doc) = msg.document()
+        && let Some(mime) = doc.mime_type.as_ref()
+        && mime.essence_str().starts_with("image/")
+    {
+        return Some(Perceived::Image {
+            file_id: doc.file.id.clone(),
+            mime: mime.essence_str().to_string(),
+        });
+    }
+    None
+}
+
+/// Download → SHA256 → cache lookup → (on miss) acquire vision slot →
+/// describe → cache write → release. Errors are mapped to `Ok(None)` at
+/// the top level so a flaky perception call never blocks message saving.
+async fn perceive_media(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<Option<String>> {
+    let Some(kind) = classify_media(msg) else {
+        return Ok(None);
+    };
+
+    let file_id = match &kind {
+        Perceived::Image { file_id, .. } | Perceived::Voice { file_id } => file_id.clone(),
+    };
+    let bytes = match download_file_bytes(bot, &file_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "media download failed");
+            return Ok(None);
+        }
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if bytes.len() > MAX_MEDIA_BYTES {
+        tracing::info!(bytes = bytes.len(), "media exceeds size cap; skipping perception");
+        return Ok(None);
+    }
+
+    let sha = sha256_hex(&bytes);
+
+    if let Some(cached) = rl::get_media_desc(&deps.redis, &sha).await? {
+        tracing::info!(chat_id = msg.chat.id.0, sha = %sha, "media cache hit");
+        return Ok(Some(cached));
+    }
+
+    let max_slots = deps.config.ratelimit.vision_concurrent;
+    if !rl::acquire_vision_slot(&deps.redis, max_slots).await? {
+        tracing::info!(chat_id = msg.chat.id.0, "vision slots full; skipping perception");
+        return Ok(None);
+    }
+
+    // Run the LLM call inside an async block so the slot release runs on
+    // both Ok and Err paths without an explicit defer wrapper. Releasing
+    // before evaluating `result` would let the slot return to the pool
+    // before the cache write — fine, since the cache write is cheap.
+    let result = match &kind {
+        Perceived::Image { mime, .. } => {
+            perception::describe_image(
+                &deps.openrouter,
+                &bytes,
+                mime,
+                &deps.config.openrouter.model_vision,
+                &deps.config.openrouter.vision_fallbacks,
+            )
+            .await
+        }
+        Perceived::Voice { .. } => {
+            perception::transcribe_voice(
+                &deps.openrouter,
+                &bytes,
+                &deps.config.openrouter.model_vision,
+            )
+            .await
+        }
+    };
+    if let Err(e) = rl::release_vision_slot(&deps.redis).await {
+        tracing::warn!(error = %e, "vision slot release failed");
+    }
+
+    match result {
+        Ok(desc) => {
+            if let Err(e) =
+                rl::put_media_desc(&deps.redis, &sha, &desc, MEDIA_CACHE_TTL_DAYS).await
+            {
+                tracing::warn!(error = %e, "media cache write failed");
+            }
+            Ok(Some(desc))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "perception call failed");
+            Ok(None)
+        }
+    }
+}
+
+async fn download_file_bytes(bot: &Bot, file_id: &str) -> anyhow::Result<Vec<u8>> {
+    let file = bot.get_file(file_id.to_string()).await?;
+    let mut stream = bot.download_file_stream(&file.path);
+    let mut buf: Vec<u8> = Vec::with_capacity(file.size as usize);
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk?;
+        if buf.len() + bytes.len() > MAX_MEDIA_BYTES {
+            anyhow::bail!("media exceeds {MAX_MEDIA_BYTES} bytes during stream");
+        }
+        buf.extend_from_slice(&bytes);
+    }
+    Ok(buf)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    hex::encode(digest)
 }

@@ -9,31 +9,75 @@ use crate::error::{Error, Result};
 const HTTP_REFERER: &str = "https://github.com/undergodst/ragtg-bot";
 const X_TITLE: &str = "ragtg-bot";
 
-/// OpenAI-compatible chat message. Currently text-only; multimodal
-/// `Vec<ContentBlock>` form will land with the vision pipeline (ШАГ 6).
+/// OpenAI-compatible chat message. `content` is either a plain string (the
+/// historical text-only form, kept for the simple system/user/assistant
+/// constructors) or an array of typed blocks (text + image_url + input_audio)
+/// used by the vision/audio pipeline. `#[serde(untagged)]` lets serde pick
+/// the right wire shape automatically.
 #[derive(Debug, Clone, Serialize)]
 pub struct Message {
     pub role: String,
-    pub content: String,
+    pub content: MessageContent,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Multipart(Vec<ContentBlock>),
+}
+
+/// One block inside a multimodal user message. The `type` field is the
+/// OpenAI/OpenRouter discriminator (`text` / `image_url` / `input_audio`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+    InputAudio { input_audio: InputAudio },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageUrl {
+    /// Either an `https://...` URL or a `data:<mime>;base64,<...>` data URL.
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InputAudio {
+    /// Raw base64 (no `data:` prefix) — that's what OpenRouter / NVIDIA
+    /// omni models expect for `input_audio` blocks.
+    pub data: String,
+    /// Format hint, e.g. `"ogg"`, `"mp3"`, `"wav"`.
+    pub format: String,
 }
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: "system".into(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
         }
     }
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".into(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".into(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
+        }
+    }
+    /// Build a `user`-role message with mixed text + media blocks. The
+    /// caller decides ordering — typical: `[Text, ImageUrl]` or
+    /// `[Text, InputAudio]`.
+    pub fn user_multipart(blocks: Vec<ContentBlock>) -> Self {
+        Self {
+            role: "user".into(),
+            content: MessageContent::Multipart(blocks),
         }
     }
 }

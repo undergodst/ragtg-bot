@@ -50,6 +50,123 @@ pub async fn check_user_cooldown(pool: &Pool, user_id: i64, cooldown_sec: u32) -
     Ok(resp.as_deref() == Some("OK"))
 }
 
+/// SHA256-keyed cache of media descriptions (image/voice/circle output from
+/// the perception sub-agent). 30-day TTL by default — same media files
+/// (memes, recurring forwards) often repeat in chats and re-running vision
+/// LLM on every appearance is the single biggest waste avoidable here.
+/// Returns `Ok(None)` on miss.
+pub async fn get_media_desc(pool: &Pool, sha256_hex: &str) -> Result<Option<String>> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = format!("media:{sha256_hex}");
+    let v: Option<String> = deadpool_redis::redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("GET {key}: {e}")))?;
+    Ok(v)
+}
+
+pub async fn put_media_desc(
+    pool: &Pool,
+    sha256_hex: &str,
+    desc: &str,
+    ttl_days: u32,
+) -> Result<()> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = format!("media:{sha256_hex}");
+    let ttl_seconds = (ttl_days as u64) * 86_400;
+    deadpool_redis::redis::cmd("SET")
+        .arg(&key)
+        .arg(desc)
+        .arg("EX")
+        .arg(ttl_seconds)
+        .query_async::<()>(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("SET {key}: {e}")))?;
+    Ok(())
+}
+
+const VISION_SLOT_KEY: &str = "vision:slots";
+/// Guard TTL on the slot counter. If a worker panics between acquire and
+/// release the counter would otherwise stay inflated forever; with a TTL
+/// it self-heals after this many seconds. Should comfortably exceed the
+/// longest vision call (OpenRouter timeout × retries).
+const VISION_SLOT_TTL_SEC: u64 = 300;
+
+/// Try to take one vision-pipeline slot. Returns `Ok(true)` if acquired
+/// (caller MUST call `release_vision_slot` on every exit path), `Ok(false)`
+/// if `max` slots are already busy.
+///
+/// Implementation: `INCR`, then if the post-increment count exceeds `max`,
+/// roll back via `DECR`. Brief over-counting under bursty contention is
+/// acceptable (a few short-lived false-busy responses, never the opposite).
+/// `EXPIRE` is set on the first hit so a crashed process can't pin the
+/// counter at the cap forever — see `VISION_SLOT_TTL_SEC`.
+pub async fn acquire_vision_slot(pool: &Pool, max: u32) -> Result<bool> {
+    if max == 0 {
+        return Ok(true);
+    }
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+
+    let count: i64 = deadpool_redis::redis::cmd("INCR")
+        .arg(VISION_SLOT_KEY)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("INCR vision: {e}")))?;
+    if count == 1 {
+        let _: i64 = deadpool_redis::redis::cmd("EXPIRE")
+            .arg(VISION_SLOT_KEY)
+            .arg(VISION_SLOT_TTL_SEC)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| Error::Redis(format!("EXPIRE vision: {e}")))?;
+    }
+    if count > max as i64 {
+        let _: i64 = deadpool_redis::redis::cmd("DECR")
+            .arg(VISION_SLOT_KEY)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| Error::Redis(format!("DECR vision rollback: {e}")))?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+pub async fn release_vision_slot(pool: &Pool) -> Result<()> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let count: i64 = deadpool_redis::redis::cmd("DECR")
+        .arg(VISION_SLOT_KEY)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("DECR vision: {e}")))?;
+    // A negative counter means a release happened without a paired acquire
+    // (or the TTL expired and reset the counter mid-flight). Force back to
+    // zero so future acquires see a sane baseline.
+    if count < 0 {
+        let _: i64 = deadpool_redis::redis::cmd("SET")
+            .arg(VISION_SLOT_KEY)
+            .arg(0)
+            .arg("EX")
+            .arg(VISION_SLOT_TTL_SEC)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| Error::Redis(format!("SET vision reset: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Per-chat LLM quota: at most `max_per_min` replies per rolling-ish minute.
 /// Implemented as a fixed-window counter (`INCR key`, set `EXPIRE 60` on the
 /// first hit). Slightly stricter than a true sliding window under bursts —
@@ -155,6 +272,55 @@ mod tests {
         for _ in 0..20 {
             assert!(check_chat_quota(&pool, chat_id, 0).await.expect("call"));
         }
+    }
+
+    #[tokio::test]
+    async fn media_desc_round_trip() {
+        let Some(pool) = pool_or_skip().await else { return };
+        let sha = "deadbeefcafebabe1111";
+        del(&pool, &format!("media:{sha}")).await;
+
+        assert!(get_media_desc(&pool, sha).await.expect("get miss").is_none());
+        put_media_desc(&pool, sha, "котик с подписью «соси»", 30)
+            .await
+            .expect("put");
+        let got = get_media_desc(&pool, sha).await.expect("get hit");
+        assert_eq!(got.as_deref(), Some("котик с подписью «соси»"));
+        del(&pool, &format!("media:{sha}")).await;
+    }
+
+    #[tokio::test]
+    async fn vision_slot_acquire_release_cycle() {
+        let Some(pool) = pool_or_skip().await else { return };
+        del(&pool, VISION_SLOT_KEY).await;
+
+        // Take 5 of 5.
+        for i in 0..5 {
+            assert!(
+                acquire_vision_slot(&pool, 5).await.expect("acq"),
+                "slot {i} must be free"
+            );
+        }
+        // 6th must be denied.
+        assert!(!acquire_vision_slot(&pool, 5).await.expect("acq full"));
+        // After releasing one, a new acquire succeeds.
+        release_vision_slot(&pool).await.expect("rel");
+        assert!(acquire_vision_slot(&pool, 5).await.expect("acq after rel"));
+        // Cleanup remaining 5.
+        for _ in 0..5 {
+            release_vision_slot(&pool).await.expect("rel");
+        }
+        del(&pool, VISION_SLOT_KEY).await;
+    }
+
+    #[tokio::test]
+    async fn vision_slot_zero_max_disables() {
+        let Some(pool) = pool_or_skip().await else { return };
+        del(&pool, VISION_SLOT_KEY).await;
+        for _ in 0..20 {
+            assert!(acquire_vision_slot(&pool, 0).await.expect("acq disabled"));
+        }
+        // No DECRs needed — `max=0` short-circuits before INCR.
     }
 
     #[tokio::test]
