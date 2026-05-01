@@ -5,6 +5,7 @@ use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
 use crate::llm::prompts::system::SYSTEM_PROMPT_BASE;
 use crate::memory::working::{self, WorkingMessage};
+use crate::storage::redis as rl;
 
 const TEXT_PREVIEW_LEN: usize = 100;
 const TEXT_MAX_LEN: usize = 8000;
@@ -21,14 +22,48 @@ pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResul
 
     match should_reply(&bot, &msg).await {
         Ok(true) => {
-            if let Err(e) = reply(&bot, &msg, &deps).await {
-                tracing::warn!(error = %e, chat_id = msg.chat.id.0, "failed to reply");
+            match rate_limit_pass(&msg, &deps).await {
+                Ok(true) => {
+                    if let Err(e) = reply(&bot, &msg, &deps).await {
+                        tracing::warn!(error = %e, chat_id = msg.chat.id.0, "failed to reply");
+                    }
+                }
+                Ok(false) => {
+                    // Silent skip per CLAUDE.md: don't tell the user they're throttled.
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "rate-limit check failed; skipping reply");
+                }
             }
         }
         Ok(false) => {}
         Err(e) => tracing::warn!(error = %e, "should_reply check failed"),
     }
     Ok(())
+}
+
+/// Check both gates: per-user cooldown (per CLAUDE.md `ratelimit.user_cooldown_sec`)
+/// and per-chat quota (`ratelimit.chat_max_per_min`). User cooldown is checked
+/// FIRST and short-circuits — a hammering user mustn't burn the whole chat's
+/// minute budget. We only consume the chat quota slot once the user passed.
+/// Returns `Ok(false)` to mean "drop this reply silently".
+async fn rate_limit_pass(msg: &Message, deps: &Deps) -> anyhow::Result<bool> {
+    let chat_id = msg.chat.id.0;
+    let cfg = &deps.config.ratelimit;
+
+    if let Some(user) = msg.from.as_ref() {
+        let user_id = user.id.0 as i64;
+        if !rl::check_user_cooldown(&deps.redis, user_id, cfg.user_cooldown_sec).await? {
+            tracing::info!(chat_id, user_id, "rate-limited by user cooldown");
+            return Ok(false);
+        }
+    }
+
+    if !rl::check_chat_quota(&deps.redis, chat_id, cfg.chat_max_per_min).await? {
+        tracing::info!(chat_id, "rate-limited by chat quota");
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 async fn save_message(msg: &Message, deps: &Deps) -> anyhow::Result<()> {
@@ -251,13 +286,15 @@ async fn persist_bot_reply(
     .execute(&deps.sqlite)
     .await?;
 
+    let has_media_zero: i64 = 0;
     sqlx::query!(
         r#"INSERT INTO messages (chat_id, user_id, tg_message_id, text, has_media)
-           VALUES (?, ?, ?, ?, 0)"#,
+           VALUES (?, ?, ?, ?, ?)"#,
         chat_id,
         bot_id,
         tg_message_id,
-        text
+        text,
+        has_media_zero
     )
     .execute(&deps.sqlite)
     .await?;
