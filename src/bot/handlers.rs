@@ -8,11 +8,12 @@ use crate::decision;
 use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
 use crate::llm::perception;
-use crate::llm::prompts::system::SYSTEM_PROMPT_BASE;
+use crate::llm::prompts::system::FULL_SYSTEM_PROMPT;
 use crate::memory::episodic;
 use crate::memory::lore;
 use crate::memory::semantic;
 use crate::memory::working::{self, WorkingMessage};
+use crate::metrics;
 use crate::storage::redis as rl;
 use crate::tasks::{extract_facts, summarize};
 
@@ -31,6 +32,8 @@ const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 /// propagated — losing a row of stats or a single LLM call isn't worth
 /// crashing the dispatcher.
 pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResult<()> {
+    metrics::MESSAGES_RECEIVED.inc();
+
     // Perceive media BEFORE persisting so the description goes into both
     // SQLite and the Redis working window in a single write — keeps the
     // working memory consistent with what the LLM will see in its prompt.
@@ -99,13 +102,15 @@ async fn rate_limit_pass(msg: &Message, deps: &Deps) -> anyhow::Result<bool> {
     if let Some(user) = msg.from.as_ref() {
         let user_id = user.id.0 as i64;
         if !rl::check_user_cooldown(&deps.redis, user_id, cfg.user_cooldown_sec).await? {
-            tracing::info!(chat_id, user_id, "rate-limited by user cooldown");
+            tracing::debug!(chat_id, user_id, "user rate-limited");
+            metrics::RATE_LIMITED.inc();
             return Ok(false);
         }
     }
 
     if !rl::check_chat_quota(&deps.redis, chat_id, cfg.chat_max_per_min).await? {
-        tracing::info!(chat_id, "rate-limited by chat quota");
+        tracing::debug!(chat_id, "chat rate-limited");
+        metrics::RATE_LIMITED.inc();
         return Ok(false);
     }
     Ok(true)
@@ -225,7 +230,7 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
     let user_facts = semantic::retrieve_facts_for_window_users(deps, chat_id, &window, &user_text).await;
 
     let mut messages = Vec::with_capacity(4 + episodic_summaries.len() + window.len());
-    messages.push(LlmMessage::system(SYSTEM_PROMPT_BASE));
+    messages.push(LlmMessage::system(&*FULL_SYSTEM_PROMPT));
 
     // Inject episodic context between system prompt and working window.
     if !episodic_summaries.is_empty() {
@@ -270,7 +275,7 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let completion = deps
         .openrouter
-        .chat_completion(&model, &messages, REPLY_MAX_TOKENS)
+        .chat_completion("reply", &model, &messages, REPLY_MAX_TOKENS)
         .await?;
 
     tracing::info!(

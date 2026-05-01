@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::error::{Error, Result};
+use crate::metrics;
 
 const HTTP_REFERER: &str = "https://github.com/undergodst/ragtg-bot";
 const X_TITLE: &str = "ragtg-bot";
@@ -164,10 +165,10 @@ impl OpenRouterClient {
         Ok(h)
     }
 
-    /// POST /chat/completions with retry on 429 / 5xx (exponential backoff,
     /// capped at `max_retries`). Returns the assistant text + token usage.
     pub async fn chat_completion(
         &self,
+        purpose: &str,
         model: &str,
         messages: &[Message],
         max_tokens: u32,
@@ -206,6 +207,12 @@ impl OpenRouterClient {
                             completion_tokens: 0,
                             total_tokens: 0,
                         });
+                        
+                        metrics::LLM_CALLS.with_label_values(&[purpose, "ok"]).inc();
+                        metrics::LLM_LATENCY
+                            .with_label_values(&[purpose])
+                            .observe(started.elapsed().as_secs_f64());
+                            
                         return Ok(ChatCompletion {
                             content,
                             model: model.to_string(),
@@ -231,6 +238,8 @@ impl OpenRouterClient {
                         attempt += 1;
                         continue;
                     }
+                    
+                    metrics::LLM_CALLS.with_label_values(&[purpose, "error"]).inc();
                     return Err(Error::OpenRouter(format!(
                         "status {} after {} attempt(s): {}",
                         status,
@@ -251,6 +260,8 @@ impl OpenRouterClient {
                         attempt += 1;
                         continue;
                     }
+                    
+                    metrics::LLM_CALLS.with_label_values(&[purpose, "error"]).inc();
                     return Err(Error::OpenRouter(format!(
                         "send after {} attempt(s): {}",
                         attempt + 1,

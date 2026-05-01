@@ -51,7 +51,7 @@ pub async fn describe_image(
     let mut last_err: Option<Error> = None;
     for model in models {
         match client
-            .chat_completion(model, &messages, VISION_MAX_TOKENS)
+            .chat_completion("perception", model, &messages, VISION_MAX_TOKENS)
             .await
         {
             Ok(c) => {
@@ -98,7 +98,7 @@ pub async fn transcribe_voice(
         },
     ])];
     let c = client
-        .chat_completion(voice_model, &messages, VISION_MAX_TOKENS)
+        .chat_completion("perception", voice_model, &messages, VISION_MAX_TOKENS)
         .await?;
     let trimmed = trim_desc(&c.content);
     if trimmed.is_empty() {

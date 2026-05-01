@@ -5,6 +5,7 @@ mod deps;
 mod error;
 mod llm;
 mod memory;
+mod metrics;
 mod personality;
 mod storage;
 mod tasks;
@@ -77,6 +78,8 @@ async fn main() -> anyhow::Result<()> {
         embeddings,
         config: Arc::new(config),
     };
+
+    metrics::init();
 
     run(deps).await
 }
@@ -201,10 +204,18 @@ async fn healthz(State(deps): State<Deps>) -> impl IntoResponse {
 }
 
 async fn metrics() -> impl IntoResponse {
-    let body = "# HELP up Whether the bot is running\n# TYPE up gauge\nup 1\n";
-    (
-        StatusCode::OK,
-        [("content-type", "text/plain; version=0.0.4")],
-        body,
-    )
+    let encoder = prometheus::TextEncoder::new();
+    let metric_families = prometheus::gather();
+    match encoder.encode_to_string(&metric_families) {
+        Ok(body) => (
+            StatusCode::OK,
+            [("content-type", "text/plain; version=0.0.4")],
+            body,
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("content-type", "text/plain; version=0.0.4")],
+            format!("# error encoding metrics: {e}\n"),
+        ),
+    }
 }

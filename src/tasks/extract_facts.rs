@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
 use crate::llm::prompts::facts::FACTS_PROMPT;
+use crate::metrics;
 use crate::storage::{qdrant as qdrant_store, redis as redis_store};
 
 const FACTS_MAX_TOKENS: u32 = 500;
@@ -85,7 +86,7 @@ async fn run_extract(deps: &Deps, chat_id: i64, user_id: i64) -> anyhow::Result<
     let model = deps.config.openrouter.model_main.clone();
     let completion = deps
         .openrouter
-        .chat_completion(&model, &prompt_messages, FACTS_MAX_TOKENS)
+        .chat_completion("facts", &model, &prompt_messages, FACTS_MAX_TOKENS)
         .await?;
 
     let raw_json = completion.content.trim();

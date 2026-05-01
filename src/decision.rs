@@ -14,6 +14,7 @@ use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
 use crate::llm::prompts::decision::DECISION_PROMPT;
 use crate::memory::working;
+use crate::metrics;
 
 const DECISION_MAX_TOKENS: u32 = 10;
 
@@ -30,6 +31,7 @@ pub async fn should_reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Resu
 
     // Private chats: always reply (bot is the only interlocutor).
     if msg.chat.is_private() {
+        metrics::DECISION_OUTCOMES.with_label_values(&["reply"]).inc();
         return Ok(true);
     }
 
@@ -51,6 +53,7 @@ pub async fn should_reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Resu
                 r,
                 "decision stage1: skipped (r > p)"
             );
+            metrics::DECISION_OUTCOMES.with_label_values(&["skip_rule"]).inc();
             return Ok(false);
         }
     }
@@ -66,16 +69,19 @@ pub async fn should_reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Resu
                     chat_id = msg.chat.id.0,
                     "decision stage2: LLM said no"
                 );
+                metrics::DECISION_OUTCOMES.with_label_values(&["skip_llm"]).inc();
                 return Ok(false);
             }
             Err(e) => {
                 // On LLM failure, let the message through — better to
                 // occasionally over-reply than silently break.
                 tracing::warn!(error = %e, "decision LLM failed; allowing reply");
+                metrics::DECISION_OUTCOMES.with_label_values(&["error"]).inc();
             }
         }
     }
 
+    metrics::DECISION_OUTCOMES.with_label_values(&["reply"]).inc();
     Ok(true)
 }
 
@@ -210,7 +216,7 @@ async fn llm_classify(msg: &Message, deps: &Deps) -> anyhow::Result<bool> {
     let model = &deps.config.openrouter.model_decision;
     let completion = deps
         .openrouter
-        .chat_completion(model, &messages, DECISION_MAX_TOKENS)
+        .chat_completion("decision", model, &messages, DECISION_MAX_TOKENS)
         .await?;
 
     let answer = completion.content.trim().to_lowercase();

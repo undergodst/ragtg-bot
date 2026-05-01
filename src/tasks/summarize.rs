@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
 use crate::llm::prompts::summary::SUMMARY_PROMPT;
+use crate::metrics;
 use crate::storage::{qdrant as qdrant_store, redis as redis_store};
 
 const SUMMARY_MAX_TOKENS: u32 = 300;
@@ -65,7 +66,7 @@ async fn run_summarize(deps: &Deps, chat_id: i64) -> anyhow::Result<()> {
     let model = deps.config.openrouter.model_main.clone();
     let completion = deps
         .openrouter
-        .chat_completion(&model, &prompt_messages, SUMMARY_MAX_TOKENS)
+        .chat_completion("summary", &model, &prompt_messages, SUMMARY_MAX_TOKENS)
         .await?;
 
     let summary_text = completion.content.trim().to_string();
@@ -128,6 +129,8 @@ async fn run_summarize(deps: &Deps, chat_id: i64) -> anyhow::Result<()> {
         point_id = %point_id,
         "episodic summary stored"
     );
+
+    metrics::SUMMARIES_CREATED.inc();
 
     Ok(())
 }
