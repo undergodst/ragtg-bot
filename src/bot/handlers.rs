@@ -2,8 +2,9 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{Chat, MessageEntityKind, MessageId, ReplyParameters};
+use teloxide::types::{Chat, MessageId, ReplyParameters};
 
+use crate::decision;
 use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
 use crate::llm::perception;
@@ -63,7 +64,7 @@ pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResul
         });
     }
 
-    match should_reply(&bot, &msg).await {
+    match decision::should_reply(&bot, &msg, &deps).await {
         Ok(true) => {
             match rate_limit_pass(&msg, &deps).await {
                 Ok(true) => {
@@ -203,50 +204,6 @@ async fn save_message(
     }
 
     Ok(())
-}
-
-/// Decide whether to answer this message: yes if the bot is @mentioned in
-/// it, or if the user replied to a bot message. Everything else is silence
-/// for now — the proper decision layer (rule + LLM) lands in ШАГ 8.
-async fn should_reply(bot: &Bot, msg: &Message) -> anyhow::Result<bool> {
-    if extract_text(msg).is_none() {
-        return Ok(false);
-    }
-
-    // Private chats: бот = единственный собеседник, всегда отвечаем.
-    if msg.chat.is_private() {
-        return Ok(true);
-    }
-
-    let me = bot.get_me().await?;
-    let bot_id = me.id.0 as i64;
-    let bot_username = me.username().to_string();
-
-    if let Some(reply_to) = msg.reply_to_message()
-        && let Some(replied_user) = reply_to.from.as_ref()
-        && replied_user.id.0 as i64 == bot_id
-    {
-        return Ok(true);
-    }
-
-    if has_mention(msg, &bot_username) {
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-fn has_mention(msg: &Message, bot_username: &str) -> bool {
-    let entities = msg.parse_entities().or_else(|| msg.parse_caption_entities());
-    let Some(entities) = entities else {
-        return false;
-    };
-    let needle = format!("@{bot_username}");
-    for ent in entities {
-        if matches!(ent.kind(), MessageEntityKind::Mention) && ent.text().eq_ignore_ascii_case(&needle) {
-            return true;
-        }
-    }
-    false
 }
 
 async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {

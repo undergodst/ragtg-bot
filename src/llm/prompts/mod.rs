@@ -1,3 +1,4 @@
+pub mod decision;
 pub mod facts;
 pub mod summary;
 pub mod system;
