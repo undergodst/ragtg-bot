@@ -10,7 +10,7 @@ use crate::llm::client::Message as LlmMessage;
 use crate::llm::perception;
 use crate::llm::prompts::system::FULL_SYSTEM_PROMPT;
 use crate::memory::episodic;
-use crate::memory::lore;
+use crate::memory::events;
 use crate::memory::semantic;
 use crate::memory::working::{self, WorkingMessage};
 use crate::metrics;
@@ -256,9 +256,9 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
         semantic::retrieve_facts_for_window_users(deps, chat_id, &window, &query_vector).await;
     tracing::info!(count = user_facts.len(), "RAG: retrieved user facts");
 
-    // Inject relevant lore entries.
-    let lore_entries = lore::retrieve_relevant_lore(deps, chat_id, &query_vector).await;
-    tracing::info!(count = lore_entries.len(), "RAG: retrieved lore entries");
+    // Inject relevant chat events (auto-curated memory of significant moments).
+    let chat_events = events::retrieve_relevant(deps, chat_id, &query_vector).await;
+    tracing::info!(count = chat_events.len(), "RAG: retrieved chat events");
 
     let mut messages = Vec::with_capacity(4 + episodic_summaries.len() + window.len());
     messages.push(LlmMessage::system(&*FULL_SYSTEM_PROMPT));
@@ -284,10 +284,10 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
         messages.push(LlmMessage::system(ctx));
     }
 
-    if !lore_entries.is_empty() {
-        let mut ctx = String::from("[Лор чата (внутряки, мемы, история)]:\n");
-        for l in &lore_entries {
-            ctx.push_str(&format!("- {l}\n"));
+    if !chat_events.is_empty() {
+        let mut ctx = String::from("[Релевантные моменты из этого чата]:\n");
+        for e in &chat_events {
+            ctx.push_str(&format!("- {e}\n"));
         }
         messages.push(LlmMessage::system(ctx));
     }
