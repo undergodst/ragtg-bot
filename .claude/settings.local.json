@@ -11,7 +11,10 @@
       "Bash(SQLX_OFFLINE=true cargo test storage::redis)",
       "Bash(export DATABASE_URL='sqlite:./data/bot.db')",
       "Bash(cargo sqlx *)",
-      "Bash(SQLX_OFFLINE=true cargo check)"
+      "Bash(SQLX_OFFLINE=true cargo check)",
+      "Bash(ssh *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)"
     ]
   }
 }

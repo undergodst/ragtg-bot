@@ -17,4 +17,6 @@ pub struct Deps {
     pub openrouter: OpenRouterClient,
     pub embeddings: EmbeddingClient,
     pub config: Arc<Config>,
+    pub bot_id: i64,
+    pub bot_username: String,
 }

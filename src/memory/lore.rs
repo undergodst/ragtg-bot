@@ -11,9 +11,9 @@ use crate::storage::qdrant as qdrant_store;
 pub async fn retrieve_relevant_lore(
     deps: &Deps,
     chat_id: i64,
-    query_text: &str,
+    vector: &[f32],
 ) -> Vec<String> {
-    match retrieve_inner(deps, chat_id, query_text).await {
+    match retrieve_inner(deps, chat_id, vector).await {
         Ok(entries) => entries,
         Err(e) => {
             tracing::warn!(
@@ -29,19 +29,17 @@ pub async fn retrieve_relevant_lore(
 async fn retrieve_inner(
     deps: &Deps,
     chat_id: i64,
-    query_text: &str,
+    vector: &[f32],
 ) -> anyhow::Result<Vec<String>> {
     let top_k = deps.config.memory.top_k_lore;
     if top_k == 0 {
         return Ok(Vec::new());
     }
 
-    let vector = deps.embeddings.embed_single(query_text).await?;
-
     let hits = qdrant_store::search_similar(
         &deps.qdrant,
         "lore",
-        vector,
+        vector.to_vec(),
         chat_id,
         top_k,
     )

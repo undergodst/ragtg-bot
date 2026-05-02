@@ -1,8 +1,8 @@
 use std::time::Duration;
+use futures_util::StreamExt;
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 use crate::error::{Error, Result};
 use crate::metrics;
@@ -88,6 +88,24 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [Message],
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningOptions>,
+}
+
+/// OpenRouter reasoning controls. `exclude=true` strips the model's chain-of-
+/// thought from the response — model still reasons internally (we want it to
+/// think hard), we just don't want the CoT leaking into the chat.
+#[derive(Debug, Serialize, Clone, Copy)]
+struct ReasoningOptions {
+    exclude: bool,
+}
+
+impl ReasoningOptions {
+    fn hidden() -> Self {
+        Self { exclude: true }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +116,22 @@ struct ChatResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct StreamChunk {
+    pub choices: Vec<StreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamChoice {
+    pub delta: StreamDelta,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamDelta {
+    pub content: Option<String>,
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct Choice {
     message: ChoiceMessage,
 }
@@ -105,16 +139,17 @@ struct Choice {
 #[derive(Debug, Deserialize)]
 struct ChoiceMessage {
     content: Option<String>,
+    reasoning: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
-struct Usage {
+pub struct Usage {
     #[serde(default)]
-    prompt_tokens: u32,
+    pub prompt_tokens: u32,
     #[serde(default)]
-    completion_tokens: u32,
+    pub completion_tokens: u32,
     #[serde(default)]
-    total_tokens: u32,
+    pub total_tokens: u32,
 }
 
 /// Outcome of a successful chat completion: the text plus telemetry the
@@ -122,6 +157,7 @@ struct Usage {
 #[derive(Debug, Clone)]
 pub struct ChatCompletion {
     pub content: String,
+    pub reasoning: Option<String>,
     pub model: String,
     pub latency_ms: u128,
     pub prompt_tokens: u32,
@@ -166,6 +202,71 @@ impl OpenRouterClient {
     }
 
     /// capped at `max_retries`). Returns the assistant text + token usage.
+    /// `disable_thinking=true` adds OpenRouter's reasoning-suppression flag
+    /// so thinking-models go straight to the answer instead of streaming a
+    /// chain-of-thought we'd have to discard anyway.
+    pub async fn chat_completion_stream(
+        &self,
+        model: &str,
+        messages: &[Message],
+        max_tokens: u32,
+        disable_thinking: bool,
+    ) -> Result<impl futures_util::Stream<Item = Result<StreamChunk>>> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let body = ChatRequest {
+            model,
+            messages,
+            max_tokens,
+            stream: Some(true),
+            reasoning: disable_thinking.then(ReasoningOptions::hidden),
+        };
+        let headers = self.headers()?;
+
+        let resp = self
+            .http
+            .post(&url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::OpenRouter(format!("send stream request: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::OpenRouter(format!("stream error {status}: {text}")));
+        }
+
+        let stream = resp.bytes_stream().map(|res| {
+            res.map_err(|e| Error::OpenRouter(format!("stream read error: {e}")))
+        });
+
+        Ok(Box::pin(async_stream::try_stream! {
+            let mut byte_buffer = Vec::new();
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                byte_buffer.extend_from_slice(&chunk);
+
+                while let Some(pos) = byte_buffer.iter().position(|&b| b == b'\n') {
+                    let line_bytes: Vec<u8> = byte_buffer.drain(..=pos).collect();
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    let line = line.trim();
+                    
+                    if line.is_empty() { continue; }
+                    if line == "data: [DONE]" { break; }
+                    
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if let Ok(parsed) = serde_json::from_str::<StreamChunk>(data) {
+                            yield parsed;
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
+    /// capped at `max_retries`). Returns the assistant text + token usage.
     pub async fn chat_completion(
         &self,
         purpose: &str,
@@ -174,7 +275,13 @@ impl OpenRouterClient {
         max_tokens: u32,
     ) -> Result<ChatCompletion> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let body = ChatRequest { model, messages, max_tokens };
+        let body = ChatRequest {
+            model,
+            messages,
+            max_tokens,
+            stream: None,
+            reasoning: None,
+        };
         let headers = self.headers()?;
 
         let started = std::time::Instant::now();
@@ -191,18 +298,48 @@ impl OpenRouterClient {
             match res {
                 Ok(resp) => {
                     let status = resp.status();
+                    let body_text = resp.text().await.unwrap_or_default();
+                    let trimmed = body_text.trim();
+                    
+                    if status.is_success() && trimmed.is_empty() {
+                        tracing::error!(status = %status, "OpenRouter 200 OK but empty body");
+                        return Err(Error::OpenRouter("Empty response from provider".into()));
+                    }
+
+                    let mut retryable = status.as_u16() == 429 || status.is_server_error();
+                    let mut success_content = None;
+                    let mut parsed_usage = None;
+
                     if status.is_success() {
-                        let parsed: ChatResponse = resp
-                            .json()
-                            .await
-                            .map_err(|e| Error::OpenRouter(format!("parse body: {e}")))?;
-                        let content = parsed
-                            .choices
-                            .into_iter()
-                            .next()
-                            .and_then(|c| c.message.content)
-                            .ok_or_else(|| Error::OpenRouter("no choices in response".into()))?;
-                        let usage = parsed.usage.unwrap_or(Usage {
+                        let trimmed = body_text.trim();
+                        match serde_json::from_str::<ChatResponse>(trimmed) {
+                            Ok(parsed) => {
+                                if let Some(choice) = parsed.choices.into_iter().next() {
+                                    let content = choice.message.content.filter(|s| !s.trim().is_empty());
+                                    let reasoning = choice.message.reasoning.filter(|s| !s.trim().is_empty());
+
+                                    // If we have content or reasoning, we consider it a success.
+                                    if content.is_some() || reasoning.is_some() {
+                                        success_content = Some((content.unwrap_or_default(), reasoning));
+                                        parsed_usage = parsed.usage;
+                                    } else {
+                                        tracing::warn!(body = %truncate(trimmed, 200), "200 OK but both content and reasoning are empty");
+                                        retryable = true;
+                                    }
+                                } else {
+                                    tracing::warn!(body = %truncate(trimmed, 200), "200 OK but no choices");
+                                    retryable = true;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, body_len = body_text.len(), "failed to parse ChatResponse");
+                                retryable = true;
+                            }
+                        }
+                    }
+
+                    if let Some((content, reasoning)) = success_content {
+                        let usage = parsed_usage.unwrap_or(Usage {
                             prompt_tokens: 0,
                             completion_tokens: 0,
                             total_tokens: 0,
@@ -215,6 +352,7 @@ impl OpenRouterClient {
                             
                         return Ok(ChatCompletion {
                             content,
+                            reasoning,
                             model: model.to_string(),
                             latency_ms: started.elapsed().as_millis(),
                             prompt_tokens: usage.prompt_tokens,
@@ -223,16 +361,14 @@ impl OpenRouterClient {
                         });
                     }
 
-                    let retryable = status.as_u16() == 429 || status.is_server_error();
-                    let body_text = resp.text().await.unwrap_or_default();
                     if retryable && attempt < self.max_retries {
                         let delay_ms = backoff_ms(attempt);
-                        warn!(
+                        tracing::warn!(
                             attempt,
                             status = status.as_u16(),
                             delay_ms,
                             body = %truncate(&body_text, 200),
-                            "openrouter retryable error, backing off"
+                            "openrouter retryable error (or empty response), backing off"
                         );
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         attempt += 1;
@@ -250,7 +386,7 @@ impl OpenRouterClient {
                 Err(e) => {
                     if (e.is_timeout() || e.is_connect()) && attempt < self.max_retries {
                         let delay_ms = backoff_ms(attempt);
-                        warn!(
+                        tracing::warn!(
                             attempt,
                             error = %e,
                             delay_ms,
@@ -280,9 +416,10 @@ fn backoff_ms(attempt: u32) -> u64 {
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
+    let clean = s.replace('\n', " ").replace('\r', "");
+    if clean.chars().count() <= n {
+        clean
     } else {
-        s.chars().take(n).collect::<String>() + "…"
+        clean.chars().take(n).collect::<String>() + "…"
     }
 }

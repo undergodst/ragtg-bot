@@ -5,9 +5,10 @@ default_personality = "default"
 [openrouter]
 base_url = "https://openrouter.ai/api/v1"
 model_main = "deepseek/deepseek-v4-flash"
-model_pro = "deepseek/deepseek-v4-flash"
-model_vision = "nvidia/nemotron-3-nano-omni:free"
-model_decision = "google/gemini-2.0-flash-exp:free"
+model_pro = "deepseek/deepseek-v4-pro"
+model_ask_free = "tencent/hy3-preview:free"
+model_vision = "google/gemma-3-27b-it:free"
+model_decision = "nvidia/nemotron-3-super-120b-a12b:free"
 vision_fallbacks = ["qwen/qwen3-vl:free", "google/gemini-2.0-flash-exp:free"]
 timeout_sec = 60
 max_retries = 3

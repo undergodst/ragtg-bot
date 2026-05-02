@@ -29,6 +29,7 @@ base64 = "0.22"
 
 # Stream consumption for teloxide's download_file_stream
 futures-util = "0.3"
+async-stream = "0.3"
 
 # Observability
 tracing = "0.1"
@@ -43,3 +44,8 @@ uuid = { version = "1", features = ["v4"] }
 
 # HTTP server (healthz + metrics)
 axum = "0.8"
+
+[profile.release]
+lto = "thin"          # Faster linking than "fat" LTO
+strip = true          # Remove debug symbols to shrink binary
+codegen-units = 16    # Parallelize code generation for faster build

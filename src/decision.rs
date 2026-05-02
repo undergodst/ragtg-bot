@@ -23,9 +23,11 @@ const DECISION_MAX_TOKENS: u32 = 10;
 /// Called from `handle_message` INSTEAD of the old `should_reply` that only
 /// checked @mention / reply-to-bot.
 pub async fn should_reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<bool> {
-    // No text → nothing to reply to.
+    // Message must have either text/caption OR some form of media.
     let text = msg.text().or_else(|| msg.caption());
-    if text.is_none() {
+    let has_media = crate::bot::handlers::detect_media(msg);
+    
+    if text.is_none() && !has_media {
         return Ok(false);
     }
 
@@ -35,13 +37,12 @@ pub async fn should_reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Resu
         return Ok(true);
     }
 
-    let me = bot.get_me().await?;
-    let bot_id = me.id.0 as i64;
-    let bot_username = me.username().to_string();
+    let bot_id = deps.bot_id;
+    let bot_username = &deps.bot_username;
     let cfg = &deps.config.decision;
 
     // ── Stage 1: rule-based probability ──────────────────────────────
-    let p = compute_probability(msg, bot_id, &bot_username, cfg, &deps.redis, msg.chat.id.0).await;
+    let p = compute_probability(msg, bot_id, bot_username, &deps.config.bot.aliases, cfg, &deps.redis, msg.chat.id.0).await;
 
     // Deterministic cases (P=1.0) skip the random roll.
     if p < 1.0 {
@@ -90,6 +91,7 @@ async fn compute_probability(
     msg: &Message,
     bot_id: i64,
     bot_username: &str,
+    bot_aliases: &[String],
     cfg: &DecisionConfig,
     redis: &deadpool_redis::Pool,
     chat_id: i64,
@@ -111,8 +113,17 @@ async fn compute_probability(
     if let Some(text) = msg.text().or_else(|| msg.caption()) {
         let lower = text.to_lowercase();
         let name_lower = bot_username.to_lowercase();
+        
+        // Check official username
         if lower.contains(&name_lower) {
             return cfg.name_in_text_p;
+        }
+
+        // Check custom aliases (like 'пидрила')
+        for alias in bot_aliases {
+            if lower.contains(&alias.to_lowercase()) {
+                return cfg.name_in_text_p;
+            }
         }
 
         // Text contains a question AND bot hasn't replied in >N minutes

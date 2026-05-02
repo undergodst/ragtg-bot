@@ -25,6 +25,7 @@ pub struct Config {
 pub struct BotConfig {
     pub admin_ids: Vec<i64>,
     pub default_personality: String,
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,6 +33,7 @@ pub struct OpenRouterConfig {
     pub base_url: String,
     pub model_main: String,
     pub model_pro: String,
+    pub model_ask_free: String,
     pub model_vision: String,
     pub model_decision: String,
     pub vision_fallbacks: Vec<String>,

@@ -12,9 +12,9 @@ pub async fn retrieve_user_facts(
     deps: &Deps,
     chat_id: i64,
     user_id: i64,
-    query_text: &str,
+    vector: &[f32],
 ) -> Vec<String> {
-    match retrieve_inner(deps, chat_id, user_id, query_text).await {
+    match retrieve_inner(deps, chat_id, user_id, vector).await {
         Ok(facts) => facts,
         Err(e) => {
             tracing::warn!(
@@ -32,18 +32,16 @@ async fn retrieve_inner(
     deps: &Deps,
     chat_id: i64,
     user_id: i64,
-    query_text: &str,
+    vector: &[f32],
 ) -> anyhow::Result<Vec<String>> {
     let top_k = deps.config.memory.top_k_facts;
     if top_k == 0 {
         return Ok(Vec::new());
     }
 
-    let vector = deps.embeddings.embed_single(query_text).await?;
-
     let hits = qdrant_store::search_similar_user_facts(
         &deps.qdrant,
-        vector,
+        vector.to_vec(),
         chat_id,
         user_id,
         top_k,
@@ -94,7 +92,7 @@ pub async fn retrieve_facts_for_window_users(
     deps: &Deps,
     chat_id: i64,
     window: &[crate::memory::working::WorkingMessage],
-    query_text: &str,
+    vector: &[f32],
 ) -> HashMap<String, Vec<String>> {
     let mut result: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -105,7 +103,7 @@ pub async fn retrieve_facts_for_window_users(
     }
 
     for user_id in seen_users {
-        let facts = retrieve_user_facts(deps, chat_id, user_id, query_text).await;
+        let facts = retrieve_user_facts(deps, chat_id, user_id, vector).await;
         if !facts.is_empty() {
             let display = window
                 .iter()

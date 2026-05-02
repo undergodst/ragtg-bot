@@ -10,9 +10,9 @@ use crate::storage::qdrant as qdrant_store;
 pub async fn retrieve_relevant_summaries(
     deps: &Deps,
     chat_id: i64,
-    query_text: &str,
+    vector: &[f32],
 ) -> Vec<String> {
-    match retrieve_inner(deps, chat_id, query_text).await {
+    match retrieve_inner(deps, chat_id, vector).await {
         Ok(summaries) => summaries,
         Err(e) => {
             tracing::warn!(
@@ -28,19 +28,17 @@ pub async fn retrieve_relevant_summaries(
 async fn retrieve_inner(
     deps: &Deps,
     chat_id: i64,
-    query_text: &str,
+    vector: &[f32],
 ) -> anyhow::Result<Vec<String>> {
     let top_k = deps.config.memory.top_k_summaries;
     if top_k == 0 {
         return Ok(Vec::new());
     }
 
-    let vector = deps.embeddings.embed_single(query_text).await?;
-
     let hits = qdrant_store::search_similar(
         &deps.qdrant,
         "episodic_summaries",
-        vector,
+        vector.to_vec(),
         chat_id,
         top_k,
     )

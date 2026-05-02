@@ -19,7 +19,7 @@ use crate::tasks::{extract_facts, summarize};
 
 const TEXT_PREVIEW_LEN: usize = 100;
 const TEXT_MAX_LEN: usize = 8000;
-const REPLY_MAX_TOKENS: u32 = 300;
+const REPLY_MAX_TOKENS: u32 = 2000;
 const MEDIA_CACHE_TTL_DAYS: u32 = 30;
 /// Upper bound on file size we'll send to the vision model. 10MB covers
 /// every Telegram photo (which the platform itself caps at 10MB) and most
@@ -34,16 +34,9 @@ const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResult<()> {
     metrics::MESSAGES_RECEIVED.inc();
 
-    // Perceive media BEFORE persisting so the description goes into both
-    // SQLite and the Redis working window in a single write — keeps the
-    // working memory consistent with what the LLM will see in its prompt.
-    let media_desc = match perceive_media(&bot, &msg, &deps).await {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, chat_id = msg.chat.id.0, "perceive_media failed");
-            None
-        }
-    };
+    // DON'T perceive media automatically anymore to save tokens.
+    // Perception will be triggered on-demand if the bot needs to reply.
+    let media_desc: Option<String> = None;
 
     if let Err(e) = save_message(&msg, &deps, media_desc.as_deref()).await {
         tracing::warn!(error = %e, chat_id = msg.chat.id.0, "failed to persist message");
@@ -61,7 +54,8 @@ pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResul
             }
             // Also trigger per-user fact extraction.
             if let Some(uid) = user_id_bg {
-                if let Err(e) = extract_facts::maybe_extract_facts(&deps_bg, chat_id_bg, uid).await {
+                if let Err(e) = extract_facts::maybe_extract_facts(&deps_bg, chat_id_bg, uid).await
+                {
                     tracing::warn!(error = %e, chat_id = chat_id_bg, user_id = uid, "facts extraction failed");
                 }
             }
@@ -70,10 +64,11 @@ pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResul
 
     match decision::should_reply(&bot, &msg, &deps).await {
         Ok(true) => {
+            tracing::info!(chat_id = msg.chat.id.0, "decision: replying to message");
             match rate_limit_pass(&msg, &deps).await {
                 Ok(true) => {
                     if let Err(e) = reply(&bot, &msg, &deps).await {
-                        tracing::warn!(error = %e, chat_id = msg.chat.id.0, "failed to reply");
+                        tracing::error!(error = %e, "reply failed");
                     }
                 }
                 Ok(false) => {
@@ -116,11 +111,7 @@ async fn rate_limit_pass(msg: &Message, deps: &Deps) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-async fn save_message(
-    msg: &Message,
-    deps: &Deps,
-    media_desc: Option<&str>,
-) -> anyhow::Result<()> {
+async fn save_message(msg: &Message, deps: &Deps, media_desc: Option<&str>) -> anyhow::Result<()> {
     let Some(user) = msg.from.as_ref() else {
         // Channel post / anonymous group admin / etc. Skip for now.
         return Ok(());
@@ -223,11 +214,51 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
             Vec::new()
         });
 
+    // On-demand perception: if the message or what it replies to has media, see it now.
+    let mut current_media_desc = None;
+    if detect_media(msg) {
+        tracing::info!("detect_media found media in current message");
+        current_media_desc = perceive_media(bot, msg, deps).await.unwrap_or(None);
+    } else if let Some(reply_to) = msg.reply_to_message() {
+        tracing::info!("checking reply_to_message for media");
+        if detect_media(reply_to) {
+            tracing::info!("detect_media found media in replied message");
+            current_media_desc = perceive_media(bot, reply_to, deps).await.unwrap_or(None);
+        } else {
+            tracing::info!("no media found in replied message");
+        }
+    }
+
+    if let Some(ref desc) = current_media_desc {
+        tracing::info!(desc = %desc, "media perceived successfully");
+    }
+
+    // Compute query embedding once for all RAG retrievals.
+    let query_vector = deps
+        .embeddings
+        .embed_single(&user_text)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to embed query; proceeding with zero vector");
+            vec![0.0; crate::storage::qdrant::VECTOR_DIM as usize] // BGE-M3 dim — must match Qdrant collections, else search errors.
+        });
+
     // Retrieve relevant episodic summaries (long-term memory).
-    let episodic_summaries = episodic::retrieve_relevant_summaries(deps, chat_id, &user_text).await;
+    let episodic_summaries =
+        episodic::retrieve_relevant_summaries(deps, chat_id, &query_vector).await;
+    tracing::info!(
+        count = episodic_summaries.len(),
+        "RAG: retrieved episodic summaries"
+    );
 
     // Retrieve facts about users in the working window.
-    let user_facts = semantic::retrieve_facts_for_window_users(deps, chat_id, &window, &user_text).await;
+    let user_facts =
+        semantic::retrieve_facts_for_window_users(deps, chat_id, &window, &query_vector).await;
+    tracing::info!(count = user_facts.len(), "RAG: retrieved user facts");
+
+    // Inject relevant lore entries.
+    let lore_entries = lore::retrieve_relevant_lore(deps, chat_id, &query_vector).await;
+    tracing::info!(count = lore_entries.len(), "RAG: retrieved lore entries");
 
     let mut messages = Vec::with_capacity(4 + episodic_summaries.len() + window.len());
     messages.push(LlmMessage::system(&*FULL_SYSTEM_PROMPT));
@@ -253,8 +284,6 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
         messages.push(LlmMessage::system(ctx));
     }
 
-    // Inject relevant lore entries.
-    let lore_entries = lore::retrieve_relevant_lore(deps, chat_id, &user_text).await;
     if !lore_entries.is_empty() {
         let mut ctx = String::from("[Лор чата (внутряки, мемы, история)]:\n");
         for l in &lore_entries {
@@ -266,17 +295,26 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
     for w in &window {
         messages.push(LlmMessage::user(format_window_msg(w)));
     }
-    let me = bot.get_me().await?;
-    let me_username = me.username();
+    let me_username = &deps.bot_username;
     let user_role = format_current_msg(msg, &user_text);
+    let user_role = if let Some(desc) = current_media_desc {
+        format!("{} [Изображение/Голосовое: {}]", user_role, desc)
+    } else {
+        user_role
+    };
     messages.push(LlmMessage::user(user_role));
 
     let model = deps.config.openrouter.model_main.clone();
     let started = std::time::Instant::now();
+    tracing::info!(chat_id, model = %model, msg_count = messages.len(), "calling main LLM for reply");
+    tracing::debug!(chat_id, messages = ?messages, "main LLM request payload");
+
     let completion = deps
         .openrouter
         .chat_completion("reply", &model, &messages, REPLY_MAX_TOKENS)
         .await?;
+
+    let reply_text = completion.content.trim();
 
     tracing::info!(
         chat_id,
@@ -286,10 +324,10 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
         completion_tokens = completion.completion_tokens,
         total_tokens = completion.total_tokens,
         wall_ms = started.elapsed().as_millis() as u64,
+        reply = %reply_text,
         "llm reply"
     );
 
-    let reply_text = completion.content.trim();
     if reply_text.is_empty() {
         tracing::warn!(chat_id, "llm returned empty content; skipping send");
         return Ok(());
@@ -300,7 +338,7 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
         .reply_parameters(ReplyParameters::new(MessageId(msg.id.0)))
         .await?;
 
-    persist_bot_reply(&sent, me.id.0 as i64, me_username, deps).await?;
+    persist_bot_reply(&sent, deps.bot_id, me_username, deps).await?;
     Ok(())
 }
 
@@ -416,7 +454,7 @@ fn clip_text(t: Option<String>) -> Option<String> {
     })
 }
 
-fn detect_media(msg: &Message) -> bool {
+pub(crate) fn detect_media(msg: &Message) -> bool {
     msg.photo().is_some()
         || msg.video().is_some()
         || msg.voice().is_some()
@@ -479,6 +517,7 @@ async fn perceive_media(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result
     let Some(kind) = classify_media(msg) else {
         return Ok(None);
     };
+    let chat_id = msg.chat.id.0;
 
     let file_id = match &kind {
         Perceived::Image { file_id, .. } | Perceived::Voice { file_id } => file_id.clone(),
@@ -494,20 +533,29 @@ async fn perceive_media(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result
         return Ok(None);
     }
     if bytes.len() > MAX_MEDIA_BYTES {
-        tracing::info!(bytes = bytes.len(), "media exceeds size cap; skipping perception");
+        tracing::info!(
+            bytes = bytes.len(),
+            "media exceeds size cap; skipping perception"
+        );
         return Ok(None);
     }
 
     let sha = sha256_hex(&bytes);
 
-    if let Some(cached) = rl::get_media_desc(&deps.redis, &sha).await? {
-        tracing::info!(chat_id = msg.chat.id.0, sha = %sha, "media cache hit");
+    tracing::info!(chat_id, sha = %sha, "Perception: checking media cache");
+    if let Ok(Some(cached)) = rl::get_media_desc(&deps.redis, &sha).await {
+        tracing::info!(chat_id, sha = %sha, "Perception: cache hit, reusing description");
         return Ok(Some(cached));
     }
 
+    tracing::info!(chat_id, "Perception: cache miss, calling vision model...");
+
     let max_slots = deps.config.ratelimit.vision_concurrent;
     if !rl::acquire_vision_slot(&deps.redis, max_slots).await? {
-        tracing::info!(chat_id = msg.chat.id.0, "vision slots full; skipping perception");
+        tracing::info!(
+            chat_id = msg.chat.id.0,
+            "vision slots full; skipping perception"
+        );
         return Ok(None);
     }
 
@@ -541,8 +589,7 @@ async fn perceive_media(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result
 
     match result {
         Ok(desc) => {
-            if let Err(e) =
-                rl::put_media_desc(&deps.redis, &sha, &desc, MEDIA_CACHE_TTL_DAYS).await
+            if let Err(e) = rl::put_media_desc(&deps.redis, &sha, &desc, MEDIA_CACHE_TTL_DAYS).await
             {
                 tracing::warn!(error = %e, "media cache write failed");
             }

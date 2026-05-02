@@ -19,7 +19,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::get;
 use serde::Serialize;
-use teloxide::Bot;
+use teloxide::prelude::*;
+use teloxide::utils::command::BotCommands;
 use tokio::try_join;
 use tracing_subscriber::EnvFilter;
 
@@ -71,6 +72,15 @@ async fn main() -> anyhow::Result<()> {
         config.openrouter.max_retries,
     )?;
 
+    let bot_client = Bot::new(config.secrets.tg_bot_token.clone());
+    let me = bot_client.get_me().await.map_err(|e| anyhow::anyhow!("Failed to connect to Telegram: {e}"))?;
+    tracing::info!(username = %me.username(), "bot identity verified");
+    
+    // Register commands menu
+    if let Err(e) = bot_client.set_my_commands(crate::bot::commands::Command::bot_commands()).await {
+        tracing::warn!(error = %e, "failed to register bot commands");
+    }
+
     let deps = Deps {
         sqlite: sqlite_pool,
         qdrant: Arc::new(qdrant_client),
@@ -78,6 +88,8 @@ async fn main() -> anyhow::Result<()> {
         openrouter,
         embeddings,
         config: Arc::new(config),
+        bot_id: me.id.0 as i64,
+        bot_username: me.username().to_string(),
     };
 
     metrics::init();
