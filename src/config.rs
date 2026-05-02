@@ -74,6 +74,7 @@ pub struct MemoryConfig {
     pub top_k_summaries: u32,
     pub top_k_facts: u32,
     pub top_k_lore: u32,
+    pub top_k_events: u32,
     pub fact_dedup_threshold: f32,
 }
 

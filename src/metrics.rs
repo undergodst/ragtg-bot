@@ -77,6 +77,14 @@ pub static RATE_LIMITED: LazyLock<IntCounter> = LazyLock::new(|| {
     .expect("register bot_rate_limited_total")
 });
 
+/// Chat events successfully stored (Phase 3 scorer will drive this).
+pub static EVENTS_STORED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        Opts::new("bot_events_stored_total", "chat_events successfully stored")
+    )
+    .expect("register bot_events_stored_total")
+});
+
 /// Force-initialize all metrics so they appear in /metrics even before
 /// the first event. Call once at startup.
 pub fn init() {
@@ -88,4 +96,5 @@ pub fn init() {
     LazyLock::force(&SUMMARIES_CREATED);
     LazyLock::force(&FACTS_EXTRACTED);
     LazyLock::force(&RATE_LIMITED);
+    LazyLock::force(&EVENTS_STORED_TOTAL);
 }

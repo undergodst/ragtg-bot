@@ -37,6 +37,7 @@ facts_lookback = 100
 top_k_summaries = 3
 top_k_facts = 5
 top_k_lore = 3
+top_k_events = 5
 fact_dedup_threshold = 0.85
 
 [ratelimit]
