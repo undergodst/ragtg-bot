@@ -2,7 +2,7 @@ use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 
 use crate::deps::Deps;
-use crate::memory::{lore, working};
+use crate::memory::working;
 
 #[derive(BotCommands, Clone, Debug)]
 #[command(rename_rule = "snake_case", description = "Команды:")]
@@ -19,12 +19,6 @@ pub enum Command {
     Stats,
     #[command(description = "[admin] показать working memory чата")]
     Window,
-    #[command(description = "[admin] добавить лор: /lore_add текст")]
-    LoreAdd(String),
-    #[command(description = "[admin] список лора")]
-    LoreList,
-    #[command(description = "[admin] удалить лор: /lore_del ID")]
-    LoreDel(String),
     #[command(description = "задать вопрос ИИ-ассистенту (1 раз в 1 минуту)")]
     Ask(String),
     #[command(description = "задать вопрос безлимитной бесплатной ИИ-модели", rename = "askfree")]
@@ -53,9 +47,9 @@ pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> Respons
 Я не просто бот формата «вопрос-ответ». Я полноценный участник чата:\n\
 • 🧠 <b>Помню историю</b> — слежу за контекстом и учитываю прошлые сообщения.\n\
 • 🖼️ <b>Вижу медиа</b> — кидай фото, голосовые, стикеры — разберу.\n\
-• 📚 <b>Храню лор</b> — локальные мемы и факты о вас живут вечно.\n\
+• 📚 <b>Запоминаю моменты</b> — значимые цитаты и события чата сами оседают в памяти.\n\
 • 🎭 <b>Имею характер</b> — могу потроллить, могу и дельно посоветовать.\n\
-• 🤖 <b>Сам решаю</b>, когда встрять в разговор: на упоминание, реплай или интересный вопрос.\n\
+• 🤖 <b>Сам решаю</b>, когда встрять в разговор: на упоминание или реплай.\n\
 \n\
 <b>📡 Команды:</b>\n\
 /help — список всех команд\n\
@@ -65,10 +59,7 @@ pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> Respons
 /ask &lt;вопрос&gt; — спросить умную PRO-модель (кулдаун 1 минута)\n\
 /askfree &lt;вопрос&gt; — спросить мощную бесплатную модель (без лимитов)\n\
 \n\
-<b>📚 Лор (только для админов):</b>\n\
-/lore_add &lt;текст&gt; — добавить факт навсегда\n\
-/lore_list — все факты\n\
-/lore_del &lt;ID&gt; — удалить факт\n\
+<b>🛠 Для админов:</b>\n\
 /window — короткая память бота\n\
 {aliases_line}\n\
 \n\
@@ -94,11 +85,9 @@ pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> Respons
 /ask &lt;вопрос&gt; — умная PRO-модель (кулдаун 1 минута)\n\
 /askfree &lt;вопрос&gt; — мощная бесплатная модель (безлимит)\n\
 \n\
-<b>Лор (глубокая память чата, только для админов):</b>\n\
-Лор — это вечные факты, правила чата или локальные мемы, которые я учитываю при каждом ответе.\n\
-/lore_add &lt;текст&gt; — добавить факт (например: «Олег любит пиво»)\n\
-/lore_list — посмотреть все факты\n\
-/lore_del &lt;ID&gt; — удалить факт\n\
+<b>Память:</b> сам запоминаю значимые моменты чата (цитаты, мемы, события).\n\
+\n\
+<b>Для админов:</b>\n\
 /window — посмотреть мою короткую память (последние сообщения)\n\
 \n\
 <b>Чтобы позвать меня:</b> напиши «пидрила», «бот» или «антиграв», или сделай реплай на любое моё сообщение.";
@@ -112,7 +101,7 @@ pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> Respons
                 "<b>🤖 Что я умею:</b>\n\
 • Слежу за контекстом и сам решаю, когда отвечать.\n\
 • Понимаю картинки и голосовые.\n\
-• Помню факты о пользователях и лор чата.\n\
+• Помню факты о пользователях и значимые моменты чата.\n\
 \n\
 <b>🧠 Модели (OpenRouter):</b>\n\
 1. Общение в чате: <code>{main}</code>\n\
@@ -150,9 +139,6 @@ pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> Respons
             }
         }
         Command::Window => handle_window(&bot, &msg, &deps).await?,
-        Command::LoreAdd(text) => handle_lore_add(&bot, &msg, &deps, &text).await?,
-        Command::LoreList => handle_lore_list(&bot, &msg, &deps).await?,
-        Command::LoreDel(id_str) => handle_lore_del(&bot, &msg, &deps, &id_str).await?,
         Command::Ask(question) => handle_ask(&bot, &msg, &deps, &question).await?,
         Command::AskFree(question) => handle_ask_free(&bot, &msg, &deps, &question).await?,
     }
@@ -164,98 +150,6 @@ fn is_admin(msg: &Message, deps: &Deps) -> bool {
         .as_ref()
         .map(|u| u.id.0 as i64)
         .is_some_and(|id| deps.config.bot.admin_ids.contains(&id))
-}
-
-// ── Lore commands ──────────────────────────────────────────────────
-
-async fn handle_lore_add(bot: &Bot, msg: &Message, deps: &Deps, text: &str) -> ResponseResult<()> {
-    if !is_admin(msg, deps) {
-        return Ok(());
-    }
-
-    let text = text.trim();
-    if text.is_empty() {
-        bot.send_message(msg.chat.id, "использование: /lore_add <текст лора>")
-            .await?;
-        return Ok(());
-    }
-
-    let chat_id = msg.chat.id.0;
-    let added_by = msg.from.as_ref().map(|u| u.id.0 as i64);
-
-    match lore::add_lore(deps, chat_id, text, added_by, None).await {
-        Ok(id) => {
-            bot.send_message(msg.chat.id, format!("✅ лор #{id} добавлен"))
-                .await?;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, chat_id, "lore_add failed");
-            bot.send_message(msg.chat.id, "не получилось добавить лор 😔")
-                .await?;
-        }
-    }
-    Ok(())
-}
-
-async fn handle_lore_list(bot: &Bot, msg: &Message, deps: &Deps) -> ResponseResult<()> {
-    if !is_admin(msg, deps) {
-        return Ok(());
-    }
-
-    let chat_id = msg.chat.id.0;
-    match lore::list_lore(deps, chat_id).await {
-        Ok(entries) => {
-            if entries.is_empty() {
-                bot.send_message(msg.chat.id, "лор пуст").await?;
-            } else {
-                let mut body = format!("📜 Лор ({} записей):\n\n", entries.len());
-                for (id, text) in &entries {
-                    let preview: String = text.chars().take(100).collect();
-                    body.push_str(&format!("#{id}: {preview}\n"));
-                }
-                for chunk in chunk_message(&body, 4000) {
-                    bot.send_message(msg.chat.id, chunk).await?;
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, chat_id, "lore_list failed");
-            bot.send_message(msg.chat.id, "не смог загрузить лор").await?;
-        }
-    }
-    Ok(())
-}
-
-async fn handle_lore_del(bot: &Bot, msg: &Message, deps: &Deps, id_str: &str) -> ResponseResult<()> {
-    if !is_admin(msg, deps) {
-        return Ok(());
-    }
-
-    let id_str = id_str.trim();
-    let lore_id: i64 = match id_str.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            bot.send_message(msg.chat.id, "использование: /lore_del <ID>")
-                .await?;
-            return Ok(());
-        }
-    };
-
-    match lore::delete_lore(deps, lore_id).await {
-        Ok(true) => {
-            bot.send_message(msg.chat.id, format!("🗑 лор #{lore_id} удалён"))
-                .await?;
-        }
-        Ok(false) => {
-            bot.send_message(msg.chat.id, format!("лор #{lore_id} не найден"))
-                .await?;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "lore_del failed");
-            bot.send_message(msg.chat.id, "не получилось удалить").await?;
-        }
-    }
-    Ok(())
 }
 
 // ── Ask command ────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: i64\" FROM lore WHERE qdrant_point_id = ? LIMIT 1",
+  "query": "SELECT id AS \"id!: i64\" FROM chat_events WHERE qdrant_point_id = ? LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "4ecf63dc27ff1cc7fddd626299474140e0a8a78d1212c4f33e9aa6a7c5efee89"
+  "hash": "d7b43ac2cc8ac411181f27444f93cc341d2c190ea7554ebc92379dc6e8faeeb5"
 }

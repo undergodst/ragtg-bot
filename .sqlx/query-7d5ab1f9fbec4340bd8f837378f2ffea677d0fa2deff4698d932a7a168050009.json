@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT text FROM lore WHERE id = ?",
+  "query": "SELECT text FROM chat_events WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "e3d4176829a2c6d392fd6e47699ae8d538bb45e2343c7ae00514641833ea998c"
+  "hash": "7d5ab1f9fbec4340bd8f837378f2ffea677d0fa2deff4698d932a7a168050009"
 }
