@@ -15,7 +15,7 @@ pub const VECTOR_DIM: u64 = 1024;
 pub const COLLECTIONS: &[&str] = &[
     "episodic_summaries",
     "user_facts",
-    "lore",
+    "chat_events",
     "media_descriptions",
 ];
 
@@ -41,6 +41,27 @@ pub async fn ensure_collections(client: &Qdrant) -> Result<()> {
             .create_collection(CreateCollectionBuilder::new(*name).vectors_config(cfg))
             .await
             .map_err(|e| Error::Qdrant(format!("create_collection({name}): {e}")))?;
+    }
+    Ok(())
+}
+
+/// Best-effort удаление коллекций, которые больше не входят в `COLLECTIONS`.
+/// Для апгрейдов: бывшая `lore` коллекция может остаться от старой версии,
+/// сносим её на старте чтобы не висела пустой и не фильтровала поиск
+/// мусорно. Идемпотентно: если коллекции нет — `Ok(())`.
+pub async fn cleanup_obsolete_collections(client: &Qdrant) -> Result<()> {
+    const OBSOLETE: &[&str] = &["lore"];
+    for name in OBSOLETE {
+        match client.collection_exists(*name).await {
+            Ok(true) => {
+                tracing::info!(collection = %name, "deleting obsolete qdrant collection");
+                if let Err(e) = client.delete_collection(*name).await {
+                    tracing::warn!(collection = %name, error = %e, "delete obsolete failed (non-fatal)");
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(collection = %name, error = %e, "collection_exists failed (non-fatal)"),
+        }
     }
     Ok(())
 }

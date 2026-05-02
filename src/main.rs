@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("sqlite migrations applied");
 
     storage::qdrant::ensure_collections(&qdrant_client).await?;
+    storage::qdrant::cleanup_obsolete_collections(&qdrant_client).await?;
     tracing::info!("qdrant collections ensured");
 
     storage::redis::healthcheck(&redis_pool).await?;
