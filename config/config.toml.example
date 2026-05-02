@@ -8,7 +8,6 @@ model_main = "deepseek/deepseek-v4-flash"
 model_pro = "deepseek/deepseek-v4-pro"
 model_ask_free = "tencent/hy3-preview:free"
 model_vision = "google/gemma-3-27b-it:free"
-model_decision = "nvidia/nemotron-3-super-120b-a12b:free"
 vision_fallbacks = ["qwen/qwen3-vl:free", "google/gemini-2.0-flash-exp:free"]
 timeout_sec = 60
 max_retries = 3
@@ -36,7 +35,6 @@ facts_extraction_every_n = 50
 facts_lookback = 100
 top_k_summaries = 3
 top_k_facts = 5
-top_k_lore = 3
 top_k_events = 5
 fact_dedup_threshold = 0.85
 
@@ -48,10 +46,7 @@ vision_concurrent = 5
 [decision]
 mention_p = 1.0
 reply_p = 1.0
-name_in_text_p = 0.7
-question_after_silence_p = 0.3
-silence_threshold_min = 10
-random_p = 0.05
+alias_in_text_p = 1.0
 
 [observability]
 metrics_port = 9090

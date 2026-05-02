@@ -35,7 +35,6 @@ pub struct OpenRouterConfig {
     pub model_pro: String,
     pub model_ask_free: String,
     pub model_vision: String,
-    pub model_decision: String,
     pub vision_fallbacks: Vec<String>,
     pub timeout_sec: u64,
     pub max_retries: u32,
@@ -73,7 +72,6 @@ pub struct MemoryConfig {
     pub facts_lookback: u32,
     pub top_k_summaries: u32,
     pub top_k_facts: u32,
-    pub top_k_lore: u32,
     pub top_k_events: u32,
     pub fact_dedup_threshold: f32,
 }
@@ -89,10 +87,7 @@ pub struct RateLimitConfig {
 pub struct DecisionConfig {
     pub mention_p: f32,
     pub reply_p: f32,
-    pub name_in_text_p: f32,
-    pub question_after_silence_p: f32,
-    pub silence_threshold_min: u32,
-    pub random_p: f32,
+    pub alias_in_text_p: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]

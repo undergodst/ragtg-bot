@@ -99,7 +99,7 @@ pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> Respons
             let or = &deps.config.openrouter;
             let info_text = format!(
                 "<b>🤖 Что я умею:</b>\n\
-• Слежу за контекстом и сам решаю, когда отвечать.\n\
+• Отвечаю когда позвали: @упоминание, реплай или алиас в тексте.\n\
 • Понимаю картинки и голосовые.\n\
 • Помню факты о пользователях и значимые моменты чата.\n\
 \n\
@@ -108,14 +108,12 @@ pub async fn handle(bot: Bot, msg: Message, cmd: Command, deps: Deps) -> Respons
 2. /ask (PRO): <code>{pro}</code>\n\
 3. /askfree (FREE): <code>{ask_free}</code>\n\
 4. Зрение/аудио: <code>{vision}</code>\n\
-5. Решение «отвечать или нет»: <code>{decision}</code>\n\
 \n\
 <b>💾 Память:</b> SQLite + Qdrant (BGE-M3 эмбеддинги, 1024 dim) + Redis-кэш.",
                 main = html_escape(&or.model_main),
                 pro = html_escape(&or.model_pro),
                 ask_free = html_escape(&or.model_ask_free),
                 vision = html_escape(&or.model_vision),
-                decision = html_escape(&or.model_decision),
             );
             bot.send_message(msg.chat.id, info_text)
                 .parse_mode(teloxide::types::ParseMode::Html)
