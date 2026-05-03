@@ -13,6 +13,11 @@ pub struct WorkingMessage {
     pub text: String,
     pub media_desc: Option<String>,
     pub ts: i64,
+    /// Telegram message id. `Option` for backwards-compat with entries
+    /// pushed before this field existed (they deserialize with `None`
+    /// thanks to `serde(default)`).
+    #[serde(default)]
+    pub tg_message_id: Option<i64>,
 }
 
 fn key(chat_id: i64) -> String {
@@ -116,6 +121,7 @@ mod tests {
             text: text.to_string(),
             media_desc: None,
             ts,
+            tg_message_id: None,
         }
     }
 

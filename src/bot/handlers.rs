@@ -189,6 +189,7 @@ async fn save_message(msg: &Message, deps: &Deps, media_desc: Option<&str>) -> a
             text: working_text,
             media_desc: media_desc_owned.clone(),
             ts: msg.date.timestamp(),
+            tg_message_id: Some(tg_message_id),
         };
         working::push(
             &deps.redis,
@@ -398,6 +399,7 @@ async fn persist_bot_reply(
             text: t,
             media_desc: None,
             ts: sent.date.timestamp(),
+            tg_message_id: Some(tg_message_id),
         };
         working::push(
             &deps.redis,
