@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE messages\n           SET media_description = ?\n           WHERE chat_id = ? AND tg_message_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5f38388b424211424bf06d5f7294e4096f90ca9b00723c17099ed33bbfe6486d"
+}

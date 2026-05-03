@@ -34,12 +34,29 @@ const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResult<()> {
     metrics::MESSAGES_RECEIVED.inc();
 
-    // DON'T perceive media automatically anymore to save tokens.
-    // Perception will be triggered on-demand if the bot needs to reply.
-    let media_desc: Option<String> = None;
-
-    if let Err(e) = save_message(&msg, &deps, media_desc.as_deref()).await {
+    // Persist with no description yet — async vision task will fill it in.
+    if let Err(e) = save_message(&msg, &deps, None).await {
         tracing::warn!(error = %e, chat_id = msg.chat.id.0, "failed to persist message");
+    }
+
+    // Spawn detached perception task: download → describe → cache → UPDATE
+    // SQLite + patch working-window. Failures only log; never block message
+    // flow. Cache lookups are cheap, so we always go through perceive_media,
+    // which short-circuits on hit.
+    if detect_media(&msg) {
+        let bot_clone = bot.clone();
+        let msg_clone = msg.clone();
+        let deps_clone = deps.clone();
+        tokio::spawn(async move {
+            if let Err(e) = perceive_and_persist(&bot_clone, &msg_clone, &deps_clone).await {
+                tracing::warn!(
+                    error = %e,
+                    chat_id = msg_clone.chat.id.0,
+                    tg_message_id = msg_clone.id.0,
+                    "background perception failed"
+                );
+            }
+        });
     }
 
     // Fire-and-forget background summarization check (cheap Redis INCR on
@@ -182,7 +199,10 @@ async fn save_message(msg: &Message, deps: &Deps, media_desc: Option<&str>) -> a
     // either a text body, or a media description (image/voice). A bare
     // `[photo]` with no description would dilute the prompt with noise.
     let working_text = text.clone().unwrap_or_default();
-    if !working_text.is_empty() || media_desc_owned.is_some() {
+    let has_any_content = !working_text.is_empty()
+        || media_desc_owned.is_some()
+        || has_media == 1;
+    if has_any_content {
         let entry = WorkingMessage {
             user_id,
             username: username.clone(),
@@ -547,6 +567,7 @@ async fn perceive_media(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result
     tracing::info!(chat_id, sha = %sha, "Perception: checking media cache");
     if let Ok(Some(cached)) = rl::get_media_desc(&deps.redis, &sha).await {
         tracing::info!(chat_id, sha = %sha, "Perception: cache hit, reusing description");
+        metrics::VISION_CACHE_HIT_TOTAL.inc();
         return Ok(Some(cached));
     }
 
@@ -602,6 +623,40 @@ async fn perceive_media(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result
             Ok(None)
         }
     }
+}
+
+/// Background perception pipeline: describe media, cache, write description
+/// into both SQLite (`messages.media_description`) and the chat's Redis
+/// working window. Errors propagate up and get logged at the spawn site.
+async fn perceive_and_persist(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
+    let Some(desc) = perceive_media(bot, msg, deps).await? else {
+        return Ok(()); // not classified, too big, slot full, or all models failed
+    };
+
+    let chat_id = msg.chat.id.0;
+    let tg_message_id = msg.id.0 as i64;
+
+    sqlx::query!(
+        r#"UPDATE messages
+           SET media_description = ?
+           WHERE chat_id = ? AND tg_message_id = ?"#,
+        desc,
+        chat_id,
+        tg_message_id,
+    )
+    .execute(&deps.sqlite)
+    .await?;
+
+    let patched = working::patch_media_desc(&deps.redis, chat_id, tg_message_id, &desc).await?;
+
+    tracing::info!(
+        chat_id,
+        tg_message_id,
+        patched_window = patched,
+        desc_len = desc.chars().count(),
+        "perception persisted"
+    );
+    Ok(())
 }
 
 async fn download_file_bytes(bot: &Bot, file_id: &str) -> anyhow::Result<Vec<u8>> {
