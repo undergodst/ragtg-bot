@@ -7,8 +7,8 @@ base_url = "https://openrouter.ai/api/v1"
 model_main = "deepseek/deepseek-v4-flash"
 model_pro = "deepseek/deepseek-v4-pro"
 model_ask_free = "tencent/hy3-preview:free"
-model_vision = "google/gemma-3-27b-it:free"
-vision_fallbacks = ["qwen/qwen3-vl:free", "google/gemini-2.0-flash-exp:free"]
+model_vision = "google/gemini-2.5-flash"
+vision_fallbacks = ["qwen/qwen3-vl-30b-a3b:free", "meta-llama/llama-4-scout:free"]
 timeout_sec = 60
 max_retries = 3
 
