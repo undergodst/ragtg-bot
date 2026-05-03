@@ -34,10 +34,13 @@ const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResult<()> {
     metrics::MESSAGES_RECEIVED.inc();
 
-    // Persist with no description yet — async vision task will fill it in.
-    if let Err(e) = save_message(&msg, &deps, None).await {
-        tracing::warn!(error = %e, chat_id = msg.chat.id.0, "failed to persist message");
-    }
+    let sqlite_msg_id = match save_message(&msg, &deps, None).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, chat_id = msg.chat.id.0, "failed to persist message");
+            return Ok(());
+        }
+    };
 
     // Spawn detached perception task: download → describe → cache → UPDATE
     // SQLite + patch working-window. Failures only log; never block message
@@ -48,7 +51,7 @@ pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResul
         let msg_clone = msg.clone();
         let deps_clone = deps.clone();
         tokio::spawn(async move {
-            if let Err(e) = perceive_and_persist(&bot_clone, &msg_clone, &deps_clone).await {
+            if let Err(e) = perceive_and_persist(&bot_clone, &msg_clone, &deps_clone, sqlite_msg_id).await {
                 tracing::warn!(
                     error = %e,
                     chat_id = msg_clone.chat.id.0,
@@ -75,6 +78,10 @@ pub async fn handle_message(bot: Bot, msg: Message, deps: Deps) -> ResponseResul
                 {
                     tracing::warn!(error = %e, chat_id = chat_id_bg, user_id = uid, "facts extraction failed");
                 }
+            }
+            // Trigger event scoring
+            if let Err(e) = crate::tasks::score_events::maybe_score(&deps_bg, chat_id_bg).await {
+                tracing::warn!(error = %e, chat_id = chat_id_bg, "events scoring failed");
             }
         });
     }
@@ -128,10 +135,10 @@ async fn rate_limit_pass(msg: &Message, deps: &Deps) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-async fn save_message(msg: &Message, deps: &Deps, media_desc: Option<&str>) -> anyhow::Result<()> {
+async fn save_message(msg: &Message, deps: &Deps, media_desc: Option<&str>) -> anyhow::Result<i64> {
     let Some(user) = msg.from.as_ref() else {
         // Channel post / anonymous group admin / etc. Skip for now.
-        return Ok(());
+        return Ok(0);
     };
 
     let chat_id = msg.chat.id.0;
@@ -167,7 +174,7 @@ async fn save_message(msg: &Message, deps: &Deps, media_desc: Option<&str>) -> a
     .execute(&deps.sqlite)
     .await?;
 
-    sqlx::query!(
+    let res = sqlx::query!(
         r#"INSERT INTO messages (chat_id, user_id, tg_message_id, text, has_media, media_description)
            VALUES (?, ?, ?, ?, ?, ?)"#,
         chat_id,
@@ -179,6 +186,7 @@ async fn save_message(msg: &Message, deps: &Deps, media_desc: Option<&str>) -> a
     )
     .execute(&deps.sqlite)
     .await?;
+    let sqlite_id = res.last_insert_rowid();
 
     let preview: String = text
         .as_deref()
@@ -206,7 +214,7 @@ async fn save_message(msg: &Message, deps: &Deps, media_desc: Option<&str>) -> a
         let entry = WorkingMessage {
             user_id,
             username: username.clone(),
-            text: working_text,
+            text: working_text.clone(),
             media_desc: media_desc_owned.clone(),
             ts: msg.date.timestamp(),
             tg_message_id: Some(tg_message_id),
@@ -221,7 +229,23 @@ async fn save_message(msg: &Message, deps: &Deps, media_desc: Option<&str>) -> a
         .await?;
     }
 
-    Ok(())
+    // Push to event candidates buffer if there's no media.
+    // If there is media, `perceive_and_persist` will push it once it has the description.
+    if has_media == 0 {
+        let row = events::CandidateRow {
+            sqlite_message_id: sqlite_id,
+            user_id,
+            username: username.clone(),
+            text: working_text.clone(),
+            media_desc: None,
+        };
+        let deps_bg = deps.clone();
+        tokio::spawn(async move {
+            events::enqueue_candidate(&deps_bg, chat_id, &row).await;
+        });
+    }
+
+    Ok(sqlite_id)
 }
 
 async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
@@ -678,9 +702,23 @@ async fn wait_for_media_desc(
 /// Background perception pipeline: describe media, cache, write description
 /// into both SQLite (`messages.media_description`) and the chat's Redis
 /// working window. Errors propagate up and get logged at the spawn site.
-async fn perceive_and_persist(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
+async fn perceive_and_persist(bot: &Bot, msg: &Message, deps: &Deps, sqlite_message_id: i64) -> anyhow::Result<()> {
     let Some(desc) = perceive_media(bot, msg, deps).await? else {
-        return Ok(()); // not classified, too big, slot full, or all models failed
+        // Not classified, or failed. But if the text is long enough,
+        // it still might be a candidate.
+        let user = msg.from.as_ref();
+        let user_id = user.map(|u| u.id.0 as i64).unwrap_or(0);
+        let username = user.and_then(|u| u.username.clone());
+        let text = clip_text(extract_text(msg)).unwrap_or_default();
+        let row = events::CandidateRow {
+            sqlite_message_id,
+            user_id,
+            username,
+            text,
+            media_desc: None,
+        };
+        events::enqueue_candidate(deps, msg.chat.id.0, &row).await;
+        return Ok(());
     };
 
     let chat_id = msg.chat.id.0;
@@ -706,6 +744,20 @@ async fn perceive_and_persist(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::
         desc_len = desc.chars().count(),
         "perception persisted"
     );
+
+    let user = msg.from.as_ref();
+    let user_id = user.map(|u| u.id.0 as i64).unwrap_or(0);
+    let username = user.and_then(|u| u.username.clone());
+    let text = clip_text(extract_text(msg)).unwrap_or_default();
+    let row = events::CandidateRow {
+        sqlite_message_id,
+        user_id,
+        username,
+        text,
+        media_desc: Some(desc.clone()),
+    };
+    events::enqueue_candidate(deps, chat_id, &row).await;
+
     Ok(())
 }
 

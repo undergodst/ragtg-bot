@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT u.username, m.text, m.media_description\n           FROM messages m\n           LEFT JOIN users u ON u.id = m.user_id\n           WHERE m.chat_id = ? AND m.id < ?\n           ORDER BY m.id DESC\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "username",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "text",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "media_description",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "f1a0f5b5cf3ef576efb41afb7f83e2b9b5e2652f678b5ca14a97912bc684c385"
+}

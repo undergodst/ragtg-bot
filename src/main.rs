@@ -144,6 +144,24 @@ async fn run(deps: Deps) -> anyhow::Result<()> {
     });
     tracing::info!("teloxide dispatcher started");
 
+    let deps_bg = deps.clone();
+    let dedup_task = tokio::spawn(async move {
+        let interval_sec = deps_bg.config.events.dedup_interval_sec;
+        if interval_sec == 0 {
+            return;
+        }
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_sec));
+        // Skip first tick right on startup
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(e) = crate::tasks::dedup_events::run_dedup(&deps_bg).await {
+                tracing::error!(error = %e, "dedup background task failed");
+            }
+        }
+    });
+    tracing::info!("dedup background task started");
+
     // Healthz / metrics outliving the dispatcher is intentional: an invalid TG
     // token or a transient polling failure should not take down the observability
     // surface that operators rely on to diagnose the very problem.
@@ -165,6 +183,7 @@ async fn run(deps: Deps) -> anyhow::Result<()> {
     healthz_task.abort();
     metrics_task.abort();
     dispatcher_task.abort();
+    dedup_task.abort();
     Ok(())
 }
 
