@@ -293,6 +293,121 @@ pub async fn reset_facts_counter(pool: &Pool, chat_id: i64, user_id: i64) -> Res
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// chat_events candidate buffer + dedup-set
+// ---------------------------------------------------------------------------
+
+const EVENT_CANDIDATES_TTL_SEC: i64 = 86_400; // 1 day
+const EVENT_DEDUP_SET_TTL_SEC: i64 = 3_600; // 1 hour
+
+fn event_candidates_key(chat_id: i64) -> String {
+    format!("chat:{chat_id}:event_candidates")
+}
+
+fn event_dedup_set_key(chat_id: i64) -> String {
+    format!("chat:{chat_id}:event_dedup")
+}
+
+/// Append a JSON-serialised candidate to the chat's event-candidate list.
+/// Pipeline: RPUSH + EXPIRE in one round-trip. Returns the new list length.
+pub async fn push_event_candidate(pool: &Pool, chat_id: i64, payload: &str) -> Result<i64> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = event_candidates_key(chat_id);
+    let (len, _): (i64, ()) = deadpool_redis::redis::pipe()
+        .atomic()
+        .rpush(&key, payload)
+        .expire(&key, EVENT_CANDIDATES_TTL_SEC)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("RPUSH event candidate: {e}")))?;
+    Ok(len)
+}
+
+/// Atomically read all candidates and clear the buffer (LRANGE 0 -1 + DEL,
+/// pipelined). Returns oldest-first.
+pub async fn pop_event_candidates(pool: &Pool, chat_id: i64) -> Result<Vec<String>> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = event_candidates_key(chat_id);
+    let (raw, _): (Vec<String>, i64) = deadpool_redis::redis::pipe()
+        .atomic()
+        .lrange(&key, 0, -1)
+        .del(&key)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("pop event candidates: {e}")))?;
+    Ok(raw)
+}
+
+/// Re-push candidates back onto the buffer (e.g. after a scoring failure).
+/// Uses LPUSH so they land oldest-first relative to whatever else has come
+/// in since pop_event_candidates ran.
+pub async fn requeue_event_candidates(
+    pool: &Pool,
+    chat_id: i64,
+    payloads: &[String],
+) -> Result<()> {
+    if payloads.is_empty() {
+        return Ok(());
+    }
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = event_candidates_key(chat_id);
+    let mut pipe = deadpool_redis::redis::pipe();
+    pipe.atomic();
+    // Reverse order: LPUSHing in original order would invert; LPUSH each
+    // from end-to-start preserves chronological order.
+    for p in payloads.iter().rev() {
+        pipe.lpush(&key, p);
+    }
+    pipe.expire(&key, EVENT_CANDIDATES_TTL_SEC);
+    pipe.query_async::<()>(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("requeue event candidates: {e}")))?;
+    Ok(())
+}
+
+/// Current candidate buffer length (read-only LLEN).
+pub async fn len_event_candidates(pool: &Pool, chat_id: i64) -> Result<i64> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = event_candidates_key(chat_id);
+    let len: i64 = deadpool_redis::redis::cmd("LLEN")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("LLEN event candidates: {e}")))?;
+    Ok(len)
+}
+
+/// Returns `true` if `hash` was newly added to the chat's recent-text set,
+/// `false` if it was already there. Uses SADD; refreshes TTL on every call
+/// so the rolling 1h window stays alive in active chats.
+pub async fn record_unique_event_hash(pool: &Pool, chat_id: i64, hash: &str) -> Result<bool> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = event_dedup_set_key(chat_id);
+    let (added, _): (i64, ()) = deadpool_redis::redis::pipe()
+        .atomic()
+        .sadd(&key, hash)
+        .expire(&key, EVENT_DEDUP_SET_TTL_SEC)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("record unique event hash: {e}")))?;
+    Ok(added == 1)
+}
+
 #[cfg(test)]
 mod tests {
     //! Live-Redis integration tests, skipped when Redis is unreachable.
