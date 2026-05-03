@@ -85,6 +85,31 @@ pub static EVENTS_STORED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     .expect("register bot_events_stored_total")
 });
 
+/// Successful vision/audio descriptions returned to the bot.
+pub static VISION_DESCRIBE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        Opts::new("bot_vision_describe_total", "Successful vision/audio describe calls")
+    )
+    .expect("register bot_vision_describe_total")
+});
+
+/// Media SHA256 cache hits — perception was skipped because we already had a description.
+pub static VISION_CACHE_HIT_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        Opts::new("bot_vision_cache_hit_total", "Media perception cache hits")
+    )
+    .expect("register bot_vision_cache_hit_total")
+});
+
+/// Which vision model actually produced the description (primary or any fallback).
+pub static VISION_MODEL_USED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        Opts::new("bot_vision_model_used_total", "Vision model that produced the description"),
+        &["model"]
+    )
+    .expect("register bot_vision_model_used_total")
+});
+
 /// Force-initialize all metrics so they appear in /metrics even before
 /// the first event. Call once at startup.
 pub fn init() {
@@ -97,4 +122,7 @@ pub fn init() {
     LazyLock::force(&FACTS_EXTRACTED);
     LazyLock::force(&RATE_LIMITED);
     LazyLock::force(&EVENTS_STORED_TOTAL);
+    LazyLock::force(&VISION_DESCRIBE_TOTAL);
+    LazyLock::force(&VISION_CACHE_HIT_TOTAL);
+    LazyLock::force(&VISION_MODEL_USED);
 }
