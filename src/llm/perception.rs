@@ -67,6 +67,10 @@ pub async fn describe_image(
                     total_tokens = c.total_tokens,
                     "vision describe ok"
                 );
+                crate::metrics::VISION_MODEL_USED
+                    .with_label_values(&[model])
+                    .inc();
+                crate::metrics::VISION_DESCRIBE_TOTAL.inc();
                 return Ok(trimmed);
             }
             Err(e) => {
@@ -110,6 +114,10 @@ pub async fn transcribe_voice(
         total_tokens = c.total_tokens,
         "voice transcribe ok"
     );
+    crate::metrics::VISION_MODEL_USED
+        .with_label_values(&[voice_model])
+        .inc();
+    crate::metrics::VISION_DESCRIBE_TOTAL.inc();
     Ok(trimmed)
 }
 
