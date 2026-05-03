@@ -136,6 +136,12 @@ async fn run(deps: Deps) -> anyhow::Result<()> {
     });
 
     let bot_client = Bot::new(deps.config.secrets.tg_bot_token.clone());
+
+    // Seed style shots into Qdrant for personality RAG
+    if let Err(e) = tasks::shots_seeder::seed_shots(&deps).await {
+        tracing::warn!(error = %e, "failed to seed style shots; personality RAG will be empty");
+    }
+
     let mut dispatcher = bot::build_dispatcher(bot_client, deps.clone());
     let shutdown_token = dispatcher.shutdown_token();
     let dispatcher_task = tokio::spawn(async move {

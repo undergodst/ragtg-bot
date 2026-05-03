@@ -40,7 +40,7 @@ prometheus = "0.13"
 figment = { version = "0.10", features = ["toml", "env"] }
 
 # UUIDs for Qdrant point IDs
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 # HTTP server (healthz + metrics)
 axum = "0.8"

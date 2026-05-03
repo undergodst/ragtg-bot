@@ -308,6 +308,35 @@ fn event_dedup_set_key(chat_id: i64) -> String {
     format!("chat:{chat_id}:event_dedup")
 }
 
+fn chat_dna_key(chat_id: i64) -> String {
+    format!("chat:{chat_id}:dna")
+}
+
+pub async fn get_chat_dna(pool: &Pool, chat_id: i64) -> Result<Option<String>> {
+    let mut conn = pool.get().await.map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = chat_dna_key(chat_id);
+    let dna: Option<String> = deadpool_redis::redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("GET DNA: {e}")))?;
+    Ok(dna)
+}
+
+pub async fn set_chat_dna(pool: &Pool, chat_id: i64, dna: &str, ttl_sec: u64) -> Result<()> {
+    let mut conn = pool.get().await.map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+    let key = chat_dna_key(chat_id);
+    deadpool_redis::redis::cmd("SET")
+        .arg(&key)
+        .arg(dna)
+        .arg("EX")
+        .arg(ttl_sec)
+        .query_async::<()>(&mut conn)
+        .await
+        .map_err(|e| Error::Redis(format!("SET DNA: {e}")))?;
+    Ok(())
+}
+
 /// Append a JSON-serialised candidate to the chat's event-candidate list.
 /// Pipeline: RPUSH + EXPIRE in one round-trip. Returns the new list length.
 pub async fn push_event_candidate(pool: &Pool, chat_id: i64, payload: &str) -> Result<i64> {

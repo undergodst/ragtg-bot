@@ -17,6 +17,7 @@ pub const COLLECTIONS: &[&str] = &[
     "user_facts",
     "chat_events",
     "media_descriptions",
+    "style_shots",
 ];
 
 pub fn init_client(url: &str) -> Result<Qdrant> {

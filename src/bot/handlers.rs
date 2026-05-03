@@ -8,12 +8,11 @@ use crate::decision;
 use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
 use crate::llm::perception;
-use crate::llm::prompts::system::FULL_SYSTEM_PROMPT;
-use crate::memory::episodic;
+use crate::llm::prompt_builder;
 use crate::memory::events;
-use crate::memory::semantic;
 use crate::memory::working::{self, WorkingMessage};
 use crate::metrics;
+
 use crate::storage::redis as rl;
 use crate::tasks::{extract_facts, summarize};
 
@@ -269,58 +268,8 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
             vec![0.0; crate::storage::qdrant::VECTOR_DIM as usize] // BGE-M3 dim — must match Qdrant collections, else search errors.
         });
 
-    // Retrieve relevant episodic summaries (long-term memory).
-    let episodic_summaries =
-        episodic::retrieve_relevant_summaries(deps, chat_id, &query_vector).await;
-    tracing::info!(
-        count = episodic_summaries.len(),
-        "RAG: retrieved episodic summaries"
-    );
+    let mut messages = prompt_builder::assemble(deps, chat_id, &query_vector, &window).await;
 
-    // Retrieve facts about users in the working window.
-    let user_facts =
-        semantic::retrieve_facts_for_window_users(deps, chat_id, &window, &query_vector).await;
-    tracing::info!(count = user_facts.len(), "RAG: retrieved user facts");
-
-    // Inject relevant chat events (auto-curated memory of significant moments).
-    let chat_events = events::retrieve_relevant(deps, chat_id, &query_vector).await;
-    tracing::info!(count = chat_events.len(), "RAG: retrieved chat events");
-
-    let mut messages = Vec::with_capacity(4 + episodic_summaries.len() + window.len());
-    messages.push(LlmMessage::system(&*FULL_SYSTEM_PROMPT));
-
-    // Inject episodic context between system prompt and working window.
-    if !episodic_summaries.is_empty() {
-        let mut ctx = String::from("[Релевантный контекст из прошлого чата]:\n");
-        for s in &episodic_summaries {
-            ctx.push_str(&format!("- {s}\n"));
-        }
-        messages.push(LlmMessage::system(ctx));
-    }
-
-    // Inject known facts about users.
-    if !user_facts.is_empty() {
-        let mut ctx = String::from("[Известные факты о участниках]:\n");
-        for (username, facts) in &user_facts {
-            ctx.push_str(&format!("@{username}:\n"));
-            for f in facts {
-                ctx.push_str(&format!("  - {f}\n"));
-            }
-        }
-        messages.push(LlmMessage::system(ctx));
-    }
-
-    if !chat_events.is_empty() {
-        let mut ctx = String::from("[Релевантные моменты из этого чата]:\n");
-        for e in &chat_events {
-            ctx.push_str(&format!("- {e}\n"));
-        }
-        messages.push(LlmMessage::system(ctx));
-    }
-
-    for w in &window {
-        messages.push(LlmMessage::user(format_window_msg(w)));
-    }
     let me_username = &deps.bot_username;
     let tg_msg_id = msg.id.0 as i64;
     // The async perception task races with reply assembly. If the current
@@ -455,18 +404,7 @@ async fn persist_bot_reply(
     Ok(())
 }
 
-fn format_window_msg(w: &WorkingMessage) -> String {
-    let who = w
-        .username
-        .as_deref()
-        .map(String::from)
-        .unwrap_or_else(|| format!("uid:{}", w.user_id));
-    if let Some(desc) = &w.media_desc {
-        format!("{who}: {} [{}]", w.text, desc)
-    } else {
-        format!("{who}: {}", w.text)
-    }
-}
+
 
 fn format_current_msg(msg: &Message, text: &str) -> String {
     let who = msg

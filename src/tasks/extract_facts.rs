@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::deps::Deps;
 use crate::llm::client::Message as LlmMessage;
 use crate::llm::prompts::facts::FACTS_PROMPT;
-use crate::metrics;
+
 use crate::storage::{qdrant as qdrant_store, redis as redis_store};
 
 const FACTS_MAX_TOKENS: u32 = 500;
