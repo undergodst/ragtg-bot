@@ -235,25 +235,6 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
             Vec::new()
         });
 
-    // On-demand perception: if the message or what it replies to has media, see it now.
-    let mut current_media_desc = None;
-    if detect_media(msg) {
-        tracing::info!("detect_media found media in current message");
-        current_media_desc = perceive_media(bot, msg, deps).await.unwrap_or(None);
-    } else if let Some(reply_to) = msg.reply_to_message() {
-        tracing::info!("checking reply_to_message for media");
-        if detect_media(reply_to) {
-            tracing::info!("detect_media found media in replied message");
-            current_media_desc = perceive_media(bot, reply_to, deps).await.unwrap_or(None);
-        } else {
-            tracing::info!("no media found in replied message");
-        }
-    }
-
-    if let Some(ref desc) = current_media_desc {
-        tracing::info!(desc = %desc, "media perceived successfully");
-    }
-
     // Compute query embedding once for all RAG retrievals.
     let query_vector = deps
         .embeddings
@@ -317,9 +298,25 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
         messages.push(LlmMessage::user(format_window_msg(w)));
     }
     let me_username = &deps.bot_username;
+    let tg_msg_id = msg.id.0 as i64;
+    // The async perception task may not have finished yet; pick up the
+    // description from SQLite if it's there, otherwise reply without it.
+    let media_desc_from_db: Option<String> = sqlx::query_scalar!(
+        r#"SELECT media_description FROM messages
+           WHERE chat_id = ? AND tg_message_id = ?
+           LIMIT 1"#,
+        chat_id,
+        tg_msg_id,
+    )
+    .fetch_optional(&deps.sqlite)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
     let user_role = format_current_msg(msg, &user_text);
-    let user_role = if let Some(desc) = current_media_desc {
-        format!("{} [Изображение/Голосовое: {}]", user_role, desc)
+    let user_role = if let Some(desc) = media_desc_from_db {
+        format!("{} [медиа: {}]", user_role, desc)
     } else {
         user_role
     };
