@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT media_description FROM messages\n           WHERE chat_id = ? AND tg_message_id = ?\n           LIMIT 1",
+  "query": "SELECT media_description FROM messages\n               WHERE chat_id = ? AND tg_message_id = ?\n               LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       true
     ]
   },
-  "hash": "4cd7f80250e546c15552d554157d39f95e0d4f15eccfa630f1b11d3d70116b44"
+  "hash": "25c2a4f5c897e597acce4e407aaac761014599a8fbcee451c4557e62afe136ec"
 }

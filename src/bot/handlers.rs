@@ -299,20 +299,21 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
     }
     let me_username = &deps.bot_username;
     let tg_msg_id = msg.id.0 as i64;
-    // The async perception task may not have finished yet; pick up the
-    // description from SQLite if it's there, otherwise reply without it.
-    let media_desc_from_db: Option<String> = sqlx::query_scalar!(
-        r#"SELECT media_description FROM messages
-           WHERE chat_id = ? AND tg_message_id = ?
-           LIMIT 1"#,
-        chat_id,
-        tg_msg_id,
-    )
-    .fetch_optional(&deps.sqlite)
-    .await
-    .ok()
-    .flatten()
-    .flatten();
+    // The async perception task races with reply assembly. If the current
+    // message has media, poll SQLite for a description (written by the
+    // background task) before giving up. 8s × 200ms covers the typical
+    // ~2-3s vision latency comfortably; on timeout we reply blind.
+    let media_desc_from_db: Option<String> = if detect_media(msg) {
+        wait_for_media_desc(
+            &deps.sqlite,
+            chat_id,
+            tg_msg_id,
+            std::time::Duration::from_secs(8),
+        )
+        .await
+    } else {
+        None
+    };
 
     let user_role = format_current_msg(msg, &user_text);
     let user_role = if let Some(desc) = media_desc_from_db {
@@ -619,6 +620,58 @@ async fn perceive_media(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result
             tracing::warn!(error = %e, "perception call failed");
             Ok(None)
         }
+    }
+}
+
+/// Poll SQLite for `messages.media_description` until it's filled or the
+/// timeout expires. Used by `reply()` to wait for the persist-path
+/// perception task that races it. Returns `None` on timeout — caller
+/// proceeds without the description rather than holding up the reply
+/// indefinitely.
+async fn wait_for_media_desc(
+    pool: &sqlx::SqlitePool,
+    chat_id: i64,
+    tg_message_id: i64,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let started = std::time::Instant::now();
+    let step = std::time::Duration::from_millis(200);
+    loop {
+        match sqlx::query_scalar!(
+            r#"SELECT media_description FROM messages
+               WHERE chat_id = ? AND tg_message_id = ?
+               LIMIT 1"#,
+            chat_id,
+            tg_message_id,
+        )
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(Some(desc))) => {
+                tracing::info!(
+                    chat_id,
+                    tg_message_id,
+                    waited_ms = started.elapsed().as_millis() as u64,
+                    "reply: picked up media_description from background task"
+                );
+                return Some(desc);
+            }
+            Ok(_) => {} // row missing or NULL — keep waiting
+            Err(e) => {
+                tracing::warn!(error = %e, "wait_for_media_desc query failed");
+                return None;
+            }
+        }
+        if started.elapsed() >= timeout {
+            tracing::info!(
+                chat_id,
+                tg_message_id,
+                waited_ms = started.elapsed().as_millis() as u64,
+                "reply: media_description timeout, replying without it"
+            );
+            return None;
+        }
+        tokio::time::sleep(step).await;
     }
 }
 
