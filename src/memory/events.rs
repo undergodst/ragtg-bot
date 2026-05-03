@@ -4,16 +4,106 @@
 use std::collections::HashMap;
 
 use qdrant_client::qdrant::Value as QdrantValue;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::deps::Deps;
 use crate::storage::qdrant as qdrant_store;
+use crate::storage::redis as redis_store;
 
 /// Категории событий, как их размечает LLM-скорер (Phase 3).
 /// Сейчас используется только в payload и метриках.
 pub const CATEGORIES: &[&str] = &[
     "quote", "event", "meme", "conflict", "fact", "media", "banger",
 ];
+
+/// Минимальная длина текста (без пробелов) чтобы пройти heuristic-фильтр.
+const HEURISTIC_MIN_TEXT_LEN: usize = 15;
+
+/// JSON-payload, который мы сериализуем в Redis-буфер кандидатов.
+/// Скорер потом десериализует и формирует промпт. Поля совпадают с тем
+/// что нужно `events::insert` после успешного скоринга.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateRow {
+    pub sqlite_message_id: i64,
+    pub user_id: i64,
+    pub username: Option<String>,
+    pub text: String,
+    pub media_desc: Option<String>,
+}
+
+/// Эвристика Stage 1: пропускаем явный мусор без LLM.
+/// - Слэш-команды: `/start`, `/help` и т.п.
+/// - Слишком короткий текст без медиа.
+/// - Полностью пустое сообщение (стикер без описания).
+pub fn is_candidate(text: &str, media_desc: Option<&str>) -> bool {
+    let t = text.trim();
+    if t.starts_with('/') {
+        return false;
+    }
+    let text_len_no_ws = t.chars().filter(|c| !c.is_whitespace()).count();
+    let has_text = text_len_no_ws >= HEURISTIC_MIN_TEXT_LEN;
+    let has_media = media_desc.map(|s| !s.trim().is_empty()).unwrap_or(false);
+    has_text || has_media
+}
+
+/// SHA256 от нормализованного `text + "\n" + media_desc` — ключ для дедуп-сета.
+fn dedup_hash(text: &str, media_desc: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.trim().to_lowercase().as_bytes());
+    hasher.update(b"\n");
+    if let Some(d) = media_desc {
+        hasher.update(d.trim().to_lowercase().as_bytes());
+    }
+    hex_lower(&hasher.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Пропустить через эвристику + дедуп-сет, при выживании — RPUSH в буфер.
+/// Возвращает текущую длину буфера (или 0 если кандидат отфильтрован).
+/// Best-effort: на любой Redis-ошибке тихо логирует и возвращает 0.
+pub async fn enqueue_candidate(deps: &Deps, chat_id: i64, row: &CandidateRow) -> i64 {
+    if !is_candidate(&row.text, row.media_desc.as_deref()) {
+        return 0;
+    }
+    let hash = dedup_hash(&row.text, row.media_desc.as_deref());
+    match redis_store::record_unique_event_hash(&deps.redis, chat_id, &hash).await {
+        Ok(true) => {} // first time we see this — proceed
+        Ok(false) => {
+            tracing::debug!(chat_id, "event candidate skipped: exact dupe within 1h");
+            return 0;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, chat_id, "dedup-set check failed; enqueuing anyway");
+        }
+    }
+    let payload = match serde_json::to_string(row) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "candidate serialize failed");
+            return 0;
+        }
+    };
+    match redis_store::push_event_candidate(&deps.redis, chat_id, &payload).await {
+        Ok(len) => {
+            crate::metrics::EVENTS_CANDIDATE_TOTAL.inc();
+            tracing::debug!(chat_id, buffer_len = len, "event candidate enqueued");
+            len
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, chat_id, "push event candidate failed");
+            0
+        }
+    }
+}
 
 /// Сохранить событие: текст в SQLite, вектор в Qdrant.
 /// Используется в Phase 3 фоновым скорером.

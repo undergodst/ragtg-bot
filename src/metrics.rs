@@ -85,6 +85,32 @@ pub static EVENTS_STORED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     .expect("register bot_events_stored_total")
 });
 
+/// Heuristic Stage-1 candidates that survived `is_candidate` and got
+/// pushed into the Redis buffer.
+pub static EVENTS_CANDIDATE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        Opts::new("bot_events_candidate_total", "Candidates that passed Stage-1 heuristic")
+    )
+    .expect("register bot_events_candidate_total")
+});
+
+/// Stage-2 LLM scoring outcomes per candidate batch entry.
+pub static EVENTS_SCORED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        Opts::new("bot_events_scored_total", "Candidates after LLM scoring"),
+        &["outcome"] // "kept", "dropped"
+    )
+    .expect("register bot_events_scored_total")
+});
+
+/// Events removed by the daily Stage-3 dedup pass.
+pub static EVENTS_DEDUP_REMOVED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        Opts::new("bot_events_dedup_removed_total", "Events deleted by dedup task")
+    )
+    .expect("register bot_events_dedup_removed_total")
+});
+
 /// Successful vision/audio descriptions returned to the bot.
 pub static VISION_DESCRIBE_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     register_int_counter!(
@@ -122,6 +148,9 @@ pub fn init() {
     LazyLock::force(&FACTS_EXTRACTED);
     LazyLock::force(&RATE_LIMITED);
     LazyLock::force(&EVENTS_STORED_TOTAL);
+    LazyLock::force(&EVENTS_CANDIDATE_TOTAL);
+    LazyLock::force(&EVENTS_SCORED_TOTAL);
+    LazyLock::force(&EVENTS_DEDUP_REMOVED_TOTAL);
     LazyLock::force(&VISION_DESCRIBE_TOTAL);
     LazyLock::force(&VISION_CACHE_HIT_TOTAL);
     LazyLock::force(&VISION_MODEL_USED);
