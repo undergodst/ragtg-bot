@@ -268,10 +268,15 @@ async fn reply(bot: &Bot, msg: &Message, deps: &Deps) -> anyhow::Result<()> {
             vec![0.0; crate::storage::qdrant::VECTOR_DIM as usize] // BGE-M3 dim — must match Qdrant collections, else search errors.
         });
 
+    let tg_msg_id = msg.id.0 as i64;
+    let window: Vec<_> = window
+        .into_iter()
+        .filter(|w| w.tg_message_id != Some(tg_msg_id))
+        .collect();
+
     let mut messages = prompt_builder::assemble(deps, chat_id, &query_vector, &window).await;
 
     let me_username = &deps.bot_username;
-    let tg_msg_id = msg.id.0 as i64;
     // The async perception task races with reply assembly. If the current
     // message has media, poll SQLite for a description (written by the
     // background task) before giving up. 8s × 200ms covers the typical
