@@ -17,6 +17,7 @@ pub struct Config {
     pub memory: MemoryConfig,
     pub ratelimit: RateLimitConfig,
     pub decision: DecisionConfig,
+    pub events: EventsConfig,
     pub observability: ObservabilityConfig,
     pub secrets: Secrets,
 }
@@ -88,6 +89,22 @@ pub struct DecisionConfig {
     pub mention_p: f32,
     pub reply_p: f32,
     pub alias_in_text_p: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EventsConfig {
+    /// How many candidates accumulate in Redis before triggering a scoring pass.
+    pub buffer_threshold: u32,
+    /// Minimum score (1-5) the LLM must give a candidate to keep it.
+    pub score_min: u8,
+    /// Cosine-similarity threshold above which two events are considered dupes.
+    pub dedup_threshold: f32,
+    /// Primary scoring model (free).
+    pub score_model: String,
+    /// Walked in order on primary failure (rate-limit, 5xx, timeout).
+    pub score_fallbacks: Vec<String>,
+    /// How often the dedup background task runs (seconds).
+    pub dedup_interval_sec: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

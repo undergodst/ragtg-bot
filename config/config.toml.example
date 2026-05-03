@@ -48,6 +48,14 @@ mention_p = 1.0
 reply_p = 1.0
 alias_in_text_p = 1.0
 
+[events]
+buffer_threshold = 15
+score_min = 3
+dedup_threshold = 0.92
+score_model = "google/gemma-4-31b-it:free"
+score_fallbacks = ["deepseek/deepseek-v4-flash"]
+dedup_interval_sec = 86400
+
 [observability]
 metrics_port = 9090
 healthz_port = 8080
