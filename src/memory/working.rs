@@ -65,6 +65,51 @@ pub async fn push(
     Ok(())
 }
 
+/// Update the `media_desc` field of the working-window entry whose
+/// `tg_message_id` matches. Returns `Ok(true)` if a row was patched,
+/// `Ok(false)` if no entry with that id exists in the window (e.g. the
+/// window already trimmed past it, or the entry was never pushed).
+///
+/// Не атомарно относительно `push`: если новое сообщение прилетело между
+/// LRANGE и LSET, индексы не сдвинутся (LPUSH сдвигает старые элементы
+/// дальше — а мы пишем по позиции, в которой нашли). Допустимо: в худшем
+/// случае запатчим соседнюю запись с тем же tg_message_id (которого
+/// быть не может — ID уникален в чате).
+pub async fn patch_media_desc(
+    pool: &Pool,
+    chat_id: i64,
+    tg_message_id: i64,
+    new_desc: &str,
+) -> Result<bool> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| Error::Redis(format!("get conn: {e}")))?;
+
+    let key = key(chat_id);
+    let raw: Vec<String> = conn
+        .lrange(&key, 0, -1)
+        .await
+        .map_err(|e| Error::Redis(format!("LRANGE: {e}")))?;
+
+    for (idx, s) in raw.iter().enumerate() {
+        let mut entry: WorkingMessage = match serde_json::from_str(s) {
+            Ok(e) => e,
+            Err(_) => continue, // corrupted entry — skip rather than fail the patch
+        };
+        if entry.tg_message_id == Some(tg_message_id) {
+            entry.media_desc = Some(new_desc.to_string());
+            let payload = serde_json::to_string(&entry)?;
+            let _: () = conn
+                .lset(&key, idx as isize, payload)
+                .await
+                .map_err(|e| Error::Redis(format!("LSET: {e}")))?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Read the last `n` messages from the chat window, **chronological** order
 /// (oldest first), so they can be fed straight into a prompt.
 pub async fn get_window(pool: &Pool, chat_id: i64, n: u32) -> Result<Vec<WorkingMessage>> {
@@ -201,6 +246,60 @@ mod tests {
         cleanup(&pool, chat_id).await;
         let window = get_window(&pool, chat_id, 30).await.expect("get");
         assert!(window.is_empty());
+    }
+
+    #[tokio::test]
+    async fn patch_media_desc_updates_entry_in_place() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let chat_id: i64 = -100_000_000_006;
+        cleanup(&pool, chat_id).await;
+
+        let mut a = mk(1, "first", 1);
+        a.tg_message_id = Some(101);
+        let mut b = mk(2, "", 2); // media-only message
+        b.tg_message_id = Some(102);
+        let mut c = mk(3, "third", 3);
+        c.tg_message_id = Some(103);
+
+        push(&pool, chat_id, &a, 30, 7).await.expect("push a");
+        push(&pool, chat_id, &b, 30, 7).await.expect("push b");
+        push(&pool, chat_id, &c, 30, 7).await.expect("push c");
+
+        let patched = patch_media_desc(&pool, chat_id, 102, "это мем про кота")
+            .await
+            .expect("patch");
+        assert!(patched, "should report a hit");
+
+        let window = get_window(&pool, chat_id, 30).await.expect("get");
+        assert_eq!(window.len(), 3);
+        assert_eq!(window[0].text, "first");
+        assert_eq!(window[1].text, "");
+        assert_eq!(window[1].media_desc.as_deref(), Some("это мем про кота"));
+        assert_eq!(window[2].text, "third");
+
+        cleanup(&pool, chat_id).await;
+    }
+
+    #[tokio::test]
+    async fn patch_media_desc_returns_false_for_unknown_id() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let chat_id: i64 = -100_000_000_007;
+        cleanup(&pool, chat_id).await;
+
+        let mut a = mk(1, "x", 1);
+        a.tg_message_id = Some(50);
+        push(&pool, chat_id, &a, 30, 7).await.expect("push");
+
+        let patched = patch_media_desc(&pool, chat_id, 999, "ignored")
+            .await
+            .expect("patch ok");
+        assert!(!patched, "no entry with tg_message_id=999");
+
+        cleanup(&pool, chat_id).await;
     }
 
     #[tokio::test]
